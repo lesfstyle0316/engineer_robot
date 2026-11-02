@@ -1,0 +1,42 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "default",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "${sourceDir}/cmake/gcc-arm-none-eabi.cmake",
+      "cacheVariables": {
+        "CMAKE_MAKE_PROGRAM": "D:/xx/dk/cubeclt/STM32CubeCLT_1.22.0/Ninja/bin/ninja.exe"
+      },
+      "environment": {
+        "PATH": "D:/xx/dk/cubeclt/STM32CubeCLT_1.22.0/GNU-tools-for-STM32/bin;$penv{PATH}"
+      }
+    },
+    {
+      "name": "Debug",
+      "inherits": "default",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "Release",
+      "inherits": "default",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "Debug",
+      "configurePreset": "Debug"
+    },
+    {
+      "name": "Release",
+      "configurePreset": "Release"
+    }
+  ]
+}
