@@ -17,27 +17,51 @@
 
 ## 三个应用文件夹
 
+当前采用C与C++17混合工程：CubeMX基础外设与控制数学核心使用C，参考模板的CAN/电机对象实现使用C++。头文件在各自inc，实现文件在各自src。CLion仍直接打开根CMakeLists，不需要把CubeMX生成的.c改成.cpp。
+
 ```text
-bsp/
-  inc/bsp_io.h
-  src/bsp_can.c       双 CAN 收发、接收分流、错误检测、清除待发动作帧
-  src/bsp_dbus.c      USART3 + DMA + IDLE，18字节 DBUS 接收与错误恢复
-  src/bsp_board.c     LED 和预留硬件急停、限位接口
-  src/bsp_timebase.c  独立 TIM7 HAL 时基
-user_driver/
-  inc/robot_config.h  模式、超时、限流等配置入口
-  src/robot_config.c  电机 ID、方向、传动比、PID、角度范围及上电姿态
-  inc/src drv_rc     遥控器协议与死区
-  inc/src drv_motor  大疆反馈展开、CAN 分组编码、达妙 PV 编解码
-  inc/src drv_pid    带抗积分饱和的 PI 和斜坡函数
-  inc/src drv_power  四轮功率模型、统一缩放、裁判功率/缓冲解析
-task/
-  inc/src robot_core 控制状态机、底盘、机械臂、夹爪和发送时序
-  inc/src robot_app  FreeRTOS 任务、硬件快照和调试入口
-  src/robot_selftest.c 主机回归测试，排除在固件编译之外
+bsp/inc/can_device.h          收发设备类、回调注册、固定容量发送队列
+bsp/src/can_device.cpp        报文复制、同ID合并、过期丢弃、世代取消
+bsp/src/bsp_can.cpp           HAL过滤器/中断、CAN1/CAN2发送任务、异常停机
+bsp/inc/bsp_io.h              面向C控制层的硬件接口
+bsp/src/bsp_dbus.c            遥控器DMA/IDLE接收
+bsp/src/bsp_board.c           LED、预留限位和急停
+bsp/src/bsp_timebase.c        TIM7 HAL时基
+user_driver/inc/motor_driver.h       motor_dev统一状态接口
+user_driver/inc/DJI_motor_driver.h   DJI_motor与共享控制组
+user_driver/src/DJI_motor_driver.cpp 大疆对象、编码器回调、分组槽位
+user_driver/inc/DM_motor_driver.h    DM_motor的PV/使能/失能接口
+user_driver/src/DM_motor_driver.cpp  达妙对象与状态回调
+user_driver/inc/motor_system.h       C/C++桥接接口
+user_driver/src/motor_system.cpp     十台电机和裁判接收对象的集中构造
+user_driver/inc/src robot_config     ID、方向、传动比、PID与模式配置
+user_driver/inc/src drv_motor       C协议编解码函数，供对象层复用
+user_driver/inc/src drv_rc/drv_pid/drv_power 遥控器、PI与四轮功率模型
+task/inc/src robot_core       整车控制、限功率、保护与500/200Hz时序
+task/inc/src robot_app        控制/维护任务和调试状态
+task/src/robot_selftest.c     原功能与功率主机测试，不编入固件
+task/src/can_motor_selftest.cpp 对象/队列/控制器回放测试，不编入固件
 ```
 
-CubeMX 生成的 `Core/Inc`、`Core/Src`、`Drivers`、`Middlewares` 属于基础框架。自编应用的 `.h` 全部在三个文件夹各自的 `inc`，`.c` 在各自的 `src`。构建脚本、说明与 CMake 支持文件不属于应用 C 源码层。
+### 参考模板的接入方式
+
+接口组织参考 `D:/xx/dk/dx_assignment5_freertos-main` 的CAN_bsp、motor_driver、DJI_motor_driver。底层使用 `can_device_receive`、`can_device_transmit`、`motor_dev`、`DJI_motor` 和同风格的 `DM_motor`。所有电机实例集中在motor_system.cpp，便于阅读和更改接线映射。
+
+接收流程为“标准数据帧 → 总线/ID/DLC匹配 → 已注册回调 → 电机对象反馈 → 临界区快照 → 控制器”。使用16位ID列表硬件过滤；CAN1有4个接收对象，CAN2有7个，包含DLC4的0x31裁判帧。回调带对象context，无需对带虚函数的继承类使用container_of。
+
+发送流程为“控制器 → 大疆共享组/达妙独立对象 → 报文值副本队列 → can1_send/can2_send → HAL邮箱”。BSP_CAN_Send返回是否成功入队，实际发送完成数看 `g_robot_debug.can[0/1].completed`。大疆按组统一发送，达妙按各自ID发送；不会增加第二套速度/位置PI，四轮功率限制与抗积分饱和仍在robot_core中执行。
+
+对象构造立即返回，第一帧反馈建立上电角度基准，离线与解锁由原控制器检查。构造阶段仅注册软件设备，HAL启动前一次性配置过滤器；后续添加或改ID需在motor_system.cpp更新对象并重新初始化，当前不支持运行中热插拔注册。
+
+两条总线各有固定容量16的队列，队列复制完整payload，同ID待发命令合并为最新值。默认过期5ms的报文被丢弃并上报故障；关控先清队列、递增世代并中止硬件待发邮箱。发送任务在同一短临界区完成出队、世代检查及HAL入邮箱，避免关控后旧帧重新入邮箱。
+
+邮箱完成与中止中断唤醒发送任务，发送前查询真实空邮箱，不依赖可能在中止或失败路径失配的3计数信号量。两路开启CAN自动重发，邮箱超过5ms仍未完成时中止并按原安全逻辑处理。队列容量、接收对象容量、最长待发时间集中在robot_config.h的ROBOT_CAN_*宏中。
+
+驱动对象使用固定存储，不申请电机对象堆内存。底层设置函数只更新待发缓冲；大疆共享组和达妙对象的can_send_msg才将报文副本入队。正常整车控制统一由robot_core产生最终输出，再经MotorSystem_SendFrame提交，以保持遥控保护、限位和四轮功率约束。
+
+GM6020明确使用电压接口motor_set_voltage；M3508/M2006使用motor_set_current。最终原始CAN指令用motor_set_raw_output，此接口不再重复反转方向。达妙PV位置使用减速输出轴rad，额外传动比与关节方向继续由上层配置映射。
+
+生成的Core/Inc、Core/Src、Drivers和Middlewares仍属于CubeMX基础框架。应用C/C++都在上述三个文件夹，参考工程的任务与陀螺仪依赖未接入本工程。
 
 ## 四种测试模式
 
@@ -117,11 +141,11 @@ CAN2接口的5V不是电机24V电源；电机按各自说明书供电，并按�
 | 达妙反馈 | 每条命令对应一条回复；不额外查询 |
 | robot_service任务 | 50Hz，20ms |
 
-`robot_control`是唯一常规CAN发送者，完成快照、保护判断、控制计算和本周期发送；避免多个任务同时排队发送旧动作。CAN2大疆两组分别放在偶数/奇数时隙，三台达妙放在5ms周期的第0/1/2个时隙。
+`robot_control`是电机命令的唯一常规生产者，完成快照、保护判断、控制计算并提交本周期报文。`can1_send`、`can2_send`各自独占一条总线的HAL发送入口。CAN2大疆两组分别放在偶数/奇数时隙，三台达妙放在5ms周期的第0/1/2个时隙。
 
 按每帧保守估计135bit、所有规定反馈均运行时，CAN1约60.8%、CAN2约70.2%总线占用；这是静态估算，调试时需用CAN分析仪确认实际帧间隔和丢帧。该估算未含新增裁判模块的功率反馈，按每个4字节帧100bit估算，100Hz约另加1%、1000Hz约另加10%的CAN2占用。
 
-接收中断只解析与更新反馈，控制任务通过短临界区取得一致快照。服务任务仅在控制任务仍有心跳时喂独立看门狗，约250ms无喂狗会复位。Debug通过SWD停住CPU时冻结IWDG。
+接收中断只解析与更新反馈，控制任务通过短临界区取得一致快照。服务任务仅在控制任务和两路CAN发送任务仍有心跳时喂独立看门狗，约250ms无喂狗会复位。Debug通过SWD停住CPU时冻结IWDG。
 
 HAL毫秒时基由BSP的TIM7实现，SysTick留给FreeRTOS。本机CubeMX命令行生成模板出现时基IRQ遗漏及SysTick空函数，因此工程明确在CMake中排除 `Core/Src/stm32f4xx_hal_timebase_tim.c`，使用 `bsp_timebase.c`，并在生成文件的USER CODE区接入FreeRTOS SysTick。不要同时启用两套HAL时基。
 
@@ -175,7 +199,7 @@ C620/C610/GM6020协议中没有与达妙FD等价的统一失能帧，软件用�
 
 ## 调试与验收
 
-`g_robot_debug.input`显示遥控器与十台电机反馈；`controller`显示解锁、角度、目标、命令与保护原因；`can_send_failures`统计发送失败；`max_cycle_us`记录实机测得的控制周期最长用时。调试快照每10ms更新。
+`g_robot_debug.can[0/1]`显示入队、同ID合并、发送完成、过期、拒收、取消、待发数量、HAL错误及邮箱超时计数。`g_robot_debug.input`显示遥控器与十台电机反馈；`controller`显示解锁、角度、目标、命令与保护原因；`can_send_failures`统计发送失败；`max_cycle_us`记录实机测得的控制周期最长用时。调试快照每10ms更新。
 
 在确认参数之前保持RC_ONLY。机械完成后，先使机构悬空或可靠支撑，按遥控器、底盘含后腿、机械臂、全车的顺序验证。每个阶段都检查方向、零位、行程、回中保持和关遥控器后的撤力；在最终机械载荷下调PID与夹紧电流。
 
@@ -191,7 +215,7 @@ powershell -ExecutionPolicy Bypass -File .\Test.ps1
 
 打开 `engineer_robot.ioc`，启用“Generate peripheral initialization as a pair of .c/.h files per peripheral”，当前 `ProjectManager.CoupleFile=true`；Core/Inc与Core/Src分开。保留USER CODE，工具链选CMake。
 
-生成后保留本工程根CMake中的 `include(cmake/robot.cmake)`，保留BSP时基和FreeRTOS USER CODE接入点。若新版CubeMX开始正确生成TIM7_IRQHandler，须避免它与BSP同名实现重复；保留一份实际调用HAL_TIM_IRQHandler的中断处理即可。不要删除 `bsp/user_driver/task`。
+生成后保留本工程根CMake中的 `include(cmake/robot.cmake)`，保留BSP时基和FreeRTOS USER CODE接入点。CAN1_TX_IRQHandler/CAN2_TX_IRQHandler由bsp_can.cpp提供，TX IRQ也在BSP初始化中启用；若CubeMX生成同名向量，须保留一份有效实现。若新版CubeMX开始正确生成TIM7_IRQHandler，须避免它与BSP同名实现重复；保留一份实际调用HAL_TIM_IRQHandler的中断处理即可。不要删除 `bsp/user_driver/task`。
 
 本机首次生成时曾遗漏syscalls/sysmem支持文件，现已补入ST模板，并把生成的CMake绝对路径改成相对路径。若升级CubeMX后这些文件或路径又被重写，需按新生成结果核对，再跑Debug、Release构建和Test.ps1。不要覆盖旧版本后直接烧录未经检查的工程。
 

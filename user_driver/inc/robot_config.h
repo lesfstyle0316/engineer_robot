@@ -1,12 +1,15 @@
 #ifndef ROBOT_CONFIG_H
 #define ROBOT_CONFIG_H
+#ifdef __cplusplus
+extern "C" {
+#endif
 #include <stdint.h>
 #include "drv_power.h"
 /* 唯一的集中配置入口。先看 README.md。单位写在字段名或注释中。 */
 #define ROBOT_PROFILE_RC_ONLY 0u
 #define ROBOT_PROFILE_CHASSIS 1u /* 四轮 + 同步后腿 */
-#define ROBOT_PROFILE_ARM     2u
-#define ROBOT_PROFILE_FULL    3u
+#define ROBOT_PROFILE_ARM 2u
+#define ROBOT_PROFILE_FULL 3u
 #ifndef ROBOT_DEFAULT_PROFILE
 #define ROBOT_DEFAULT_PROFILE ROBOT_PROFILE_RC_ONLY
 #endif
@@ -15,6 +18,10 @@
 #ifndef ROBOT_CONFIG_CONFIRMED
 #define ROBOT_CONFIG_CONFIRMED 0
 #endif
+/* CAN对象层容量与最长待发/邮箱驻留时间；两路分别分配固定存储。 */
+#define ROBOT_CAN_MAX_RX_PER_BUS 16u
+#define ROBOT_CAN_TX_QUEUE_CAPACITY 16u
+#define ROBOT_CAN_MAX_TX_AGE_MS 5u
 #define ROBOT_RC_TIMEOUT_MS 60u
 #define ROBOT_MOTOR_TIMEOUT_MS 50u
 #define ROBOT_NEUTRAL_DWELL_MS 500u
@@ -27,9 +34,9 @@
 #define ROBOT_RC_RIGHT_SWITCH 1u /* 协议 S2 */
 #define ROBOT_RC_FORWARD_SIGN 1.0f
 #define ROBOT_RC_TURN_SIGN 1.0f
-#define ROBOT_RC_YAW_SIGN 1.0f   /* 推右 = 正关节方向，可在此取反 */
+#define ROBOT_RC_YAW_SIGN 1.0f /* 推右 = 正关节方向，可在此取反 */
 #define ROBOT_RC_PITCH_SIGN 1.0f
-#define ROBOT_RC_GRIP_SIGN 1.0f  /* 推右 = 夹紧 */
+#define ROBOT_RC_GRIP_SIGN 1.0f     /* 推右 = 夹紧 */
 #define ROBOT_WHEEL_MAX_RPM 1500.0f /* 转子 rpm；无轮径假设 */
 #define ROBOT_WHEEL_ACCEL_RPM_S 2500.0f
 /* RoboSister电源管理模块：CAN2 / 标准帧0x31 / DLC4 / 大端int16。
@@ -51,9 +58,13 @@
 enum { DJI_LF, DJI_RF, DJI_RR, DJI_LR, DJI_YAW, DJI_SMALL_PITCH, DJI_GRIP, DJI_COUNT };
 enum { DM_LIFT_L, DM_LIFT_R, DM_BIG_PITCH, DM_COUNT };
 enum { JOINT_YAW, JOINT_SMALL_PITCH, JOINT_GRIP, JOINT_LIFT_L, JOINT_LIFT_R, JOINT_BIG_PITCH, JOINT_COUNT };
-typedef struct { float kp, ki, integral_limit, output_limit; } PidConfig;
 typedef struct {
-    uint8_t bus; uint16_t feedback_id; float direction, reduction;
+    float kp, ki, integral_limit, output_limit;
+} PidConfig;
+typedef struct {
+    uint8_t bus;
+    uint16_t feedback_id;
+    float direction, reduction;
     PidConfig speed_pid;
     float max_command; /* C620 ±16384 / C610 ±10000 / GM6020 ±30000 */
 } DjiConfig;
@@ -70,4 +81,7 @@ typedef struct {
 extern const DjiConfig g_dji_config[DJI_COUNT];
 extern const DmConfig g_dm_config[DM_COUNT];
 extern const JointConfig g_joint_config[JOINT_COUNT];
+#ifdef __cplusplus
+}
+#endif
 #endif
