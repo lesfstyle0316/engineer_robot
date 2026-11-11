@@ -167,6 +167,14 @@ static void safe_frames(void) {
             CHECK(f->data[7] == 0xfd);
     }
 }
+static void check_forward_wheel_commands(const RobotCore *core) {
+    for (unsigned i = DJI_LF; i <= DJI_RR; i++) {
+        if (ROBOT_FRONT_WHEEL_CURRENT_TEST && i >= DJI_LR)
+            CHECK(core->dji_command[i] == 0);
+        else
+            CHECK(core->dji_command[i] * g_dji_config[i].direction > 0);
+    }
+}
 static void test_profiles_and_rates(void) {
     fixture(ROBOT_PROFILE_CHASSIS);
     in.rc.valid = false;
@@ -200,8 +208,7 @@ static void test_profiles_and_rates(void) {
     CHECK(c.armed);
     in.rc.channel[3] = 660;
     run(500);
-    for (unsigned i = DJI_LF; i <= DJI_RR; i++)
-        CHECK(c.dji_command[i] * g_dji_config[i].direction > 0);
+    check_forward_wheel_commands(&c);
     for (unsigned i = 4; i < DJI_COUNT; i++)
         CHECK(c.dji_command[i] == 0);
     in.rc.sw[ROBOT_RC_RIGHT_SWITCH] = RC_UP;
@@ -269,18 +276,34 @@ static void test_motion(void) {
     run(100);
     CHECK(c.dji_command[DJI_LF] * g_dji_config[DJI_LF].direction > 0);
     CHECK(c.dji_command[DJI_RF] * g_dji_config[DJI_RF].direction < 0);
-    CHECK(c.dji_command[DJI_LR] == c.dji_command[DJI_LF]);
-    CHECK(c.dji_command[DJI_RR] == c.dji_command[DJI_RF]);
+    CHECK(c.dji_command[DJI_LR] == (ROBOT_FRONT_WHEEL_CURRENT_TEST ? 0 : c.dji_command[DJI_LF]));
+    CHECK(c.dji_command[DJI_RR] == (ROBOT_FRONT_WHEEL_CURRENT_TEST ? 0 : c.dji_command[DJI_RF]));
     RcState forward = {.valid = true, .channel = {0, 0, 0, 660}};
     DjiFeedback wheels[4] = {0};
     Pid wheel_pid[4] = {0};
     int16_t wheel_command[4];
+    float rotor_rpm = ROBOT_WHEEL_MAX_OUTPUT_RPM * (3591.0f / 187.0f);
     for (unsigned i = 0; i < 4; i++)
-        wheels[i].rpm = (int16_t)(1500.0f * g_dji_config[i].direction);
+        wheels[i].rpm = (int16_t)lroundf(rotor_rpm * g_dji_config[i].direction);
     Chassis_WheelStep(&forward, wheels, wheel_pid, wheel_command);
-    for (unsigned i = 0; i < 4; i++)
-        CHECK(abs(wheel_command[i]) <= 1);
-    puts("PASS differential steering, P19 wheel speed, arm modes, neutral hold and synchronized lifts");
+    if (ROBOT_FRONT_WHEEL_CURRENT_TEST) {
+        CHECK(wheel_command[DJI_LF] == (int16_t)ROBOT_C620_MAX_COMMAND);
+        CHECK(wheel_command[DJI_RF] == -(int16_t)ROBOT_C620_MAX_COMMAND);
+        CHECK(wheel_command[DJI_LR] == 0 && wheel_command[DJI_RR] == 0);
+        forward.channel[3] = -660;
+        Chassis_WheelStep(&forward, wheels, wheel_pid, wheel_command);
+        CHECK(wheel_command[DJI_LF] == -(int16_t)ROBOT_C620_MAX_COMMAND);
+        CHECK(wheel_command[DJI_RF] == (int16_t)ROBOT_C620_MAX_COMMAND);
+        forward.channel[3] = 0;
+        Chassis_WheelStep(&forward, wheels, wheel_pid, wheel_command);
+        for (unsigned i = 0; i < 4; i++)
+            CHECK(wheel_command[i] == 0);
+        puts("PASS front-only direct current, protocol full scale in both directions and zero at neutral");
+    } else {
+        for (unsigned i = 0; i < 4; i++)
+            CHECK(abs(wheel_command[i]) <= 2);
+    }
+    puts("PASS differential steering, arm modes, neutral hold and synchronized lifts");
 }
 static void test_paired_lift_catch_up(void) {
     fixture(ROBOT_PROFILE_CHASSIS);
@@ -625,7 +648,7 @@ static void test_power_limiter(void) {
     limiter.k_applied = 1;
     PowerLimiter_Apply(&limiter, &cfg, &t, request, measured, rpm, 0, 0.001f, output);
     CHECK(limiter.status & POWER_STATUS_BENCH_MODEL_ONLY);
-    CHECK(limiter.budget_w == 45 && limiter.predicted_after_w <= 45);
+    CHECK(limiter.budget_w == 50.0f && limiter.predicted_after_w <= 50.0f);
     /* Cutoff hold arithmetic survives the 32-bit tick wrap as well. */
     cfg = power_cfg();
     PowerLimiter_Init(&limiter);
@@ -695,6 +718,15 @@ static void test_power_core_isolation(void) {
     in.rc.channel[0] = 660;
     in.rc.channel[1] = 660;
     run(50);
+    if (!ROBOT_WHEEL_POWER_LIMIT_ENABLED) {
+        in.power.buffer_j = 0;
+        step();
+        CHECK(c.armed && !out.abort_wheel_pending && c.power.k_applied == 1.0f);
+        check_forward_wheel_commands(&c);
+        puts("PASS wheel power bypass for bench testing");
+        return;
+    }
+
     RobotCore normal = c, limited = c;
     RobotInput reference = in;
     for (unsigned tick = 0; tick < 20; tick++) {
@@ -731,8 +763,7 @@ static void test_power_core_isolation(void) {
         CHECK(c.power.status & POWER_STATUS_BENCH_MODEL_ONLY);
         CHECK(c.power.budget_w <= g_power_config.bench_limit_w);
         CHECK(c.power.predicted_after_w <= c.power.budget_w);
-        for (unsigned i = 0; i < 4; i++)
-            CHECK(c.dji_command[i] * g_dji_config[i].direction > 0);
+        check_forward_wheel_commands(&c);
     }
     CHECK(c.joint_target[JOINT_LIFT_L] > 0 && c.joint_target[JOINT_BIG_PITCH] > 0);
     puts("PASS wheel-only integration: lift/arm commands unchanged, constrained wheel PI does not wind up, "

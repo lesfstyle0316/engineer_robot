@@ -8,7 +8,7 @@ extern "C" {
 /* 唯一的集中配置入口。先看 README.md。单位写在字段名或注释中。 */
 #define ROBOT_PROFILE_CHASSIS 1u /* 四轮 + 同步后腿 */
 #define ROBOT_PROFILE_FULL 3u
-/* 当前上电默认：底盘调试（四轮 + 双后腿）。 */
+/* 当前上电默认：底盘调试。 */
 #ifndef ROBOT_DEFAULT_PROFILE
 #define ROBOT_DEFAULT_PROFILE ROBOT_PROFILE_CHASSIS
 #endif
@@ -31,14 +31,23 @@ extern "C" {
 #define ROBOT_RC_PITCH_SIGN 1.0f
 #define ROBOT_RC_GRIP_SIGN 1.0f     /* 推右 = 夹紧 */
 #define ROBOT_M3508_P19_REDUCTION (3591.0f / 187.0f)
-#define ROBOT_WHEEL_MAX_OUTPUT_RPM (1500.0f / ROBOT_M3508_P19_REDUCTION) /* 轮端约 78.1 rpm */
+#define ROBOT_WHEEL_MAX_OUTPUT_RPM (8000.0f / ROBOT_M3508_P19_REDUCTION) /* 四轮速度环的轮端目标 rpm */
+#define ROBOT_C620_MAX_COMMAND 16384.0f
+/* 前轮电流调试，后轮轮电机持续零电流。关闭后恢复四轮速度环。 */
+#ifndef ROBOT_FRONT_WHEEL_CURRENT_TEST
+#define ROBOT_FRONT_WHEEL_CURRENT_TEST 1
+#endif
 /* RoboSister电源管理模块：CAN2 / 标准帧0x31 / DLC4 / 大端int16。
  * 只从CAN接收功率与缓冲，不向裁判模块发送查询或配置命令。
- * 当前为无裁判台架调试，按45W模型限功率；比赛前改回1。 */
+ * 启用功率限制时，无裁判反馈采用50W模型预算；比赛前改回1。 */
 #define ROBOT_POWER_CAN_BUS 2u
 #define ROBOT_POWER_CAN_ID 0x31u
 #define ROBOT_POWER_BYTE_ORDER POWER_ORDER_BIG_ENDIAN
 #define ROBOT_POWER_REQUIRE_REFEREE 0
+/* 四轮功率限制开关。 */
+#ifndef ROBOT_WHEEL_POWER_LIMIT_ENABLED
+#define ROBOT_WHEEL_POWER_LIMIT_ENABLED 1
+#endif
 /* 同步阈值使用换算后的机构角度。 */
 #define ROBOT_LIFT_MAX_SKEW_DEG 5.0f
 #define ROBOT_LIFT_RESUME_SKEW_DEG 3.0f

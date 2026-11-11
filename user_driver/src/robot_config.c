@@ -1,13 +1,14 @@
 #include "robot_config.h"
 /* PID 与电流限制是低功率起调值，不是经过负载实测的最终值。
  * direction 表示电机正向对车辆/关节正向的映射。四轮方向为起调值，待逐轮实测。 */
-#define WHEEL(bus_, id_, dir_) \
-    {bus_, id_, dir_, ROBOT_M3508_P19_REDUCTION, {4.0f, 0.3f, 1200.0f, 3000.0f}, 3000.0f}
+#define FRONT_WHEEL_MAX_COMMAND (ROBOT_FRONT_WHEEL_CURRENT_TEST ? ROBOT_C620_MAX_COMMAND : 3000.0f)
+#define WHEEL(bus_, id_, dir_, max_command_) \
+    {bus_, id_, dir_, ROBOT_M3508_P19_REDUCTION, {4.0f, 0.3f, 1200.0f, 3000.0f}, max_command_}
 const DjiConfig g_dji_config[DJI_COUNT] = {
-    [DJI_LF] = WHEEL(1, 0x201, 1.0f),
-    [DJI_RF] = WHEEL(1, 0x202, -1.0f),
-    [DJI_LR] = WHEEL(1, 0x203, 1.0f),
-    [DJI_RR] = WHEEL(1, 0x204, -1.0f),
+    [DJI_LF] = WHEEL(1, 0x201, 1.0f, FRONT_WHEEL_MAX_COMMAND),
+    [DJI_RF] = WHEEL(1, 0x202, -1.0f, FRONT_WHEEL_MAX_COMMAND),
+    [DJI_LR] = WHEEL(1, 0x203, 1.0f, 3000.0f),
+    [DJI_RR] = WHEEL(1, 0x204, -1.0f, 3000.0f),
     {2, 0x205, 1.0f, 1.0f, {60.0f, 5.0f, 800.0f, 4000.0f}, 4000.0f}, /* GM6020 ID1: 电压值 */
     {2, 0x201, 1.0f, 36.0f, {3.0f, 0.2f, 500.0f, 1800.0f}, 1800.0f}, /* M2006/C610 ID1 */
     {2, 0x202, 1.0f, 36.0f, {3.0f, 0.2f, 500.0f, 1800.0f}, 1800.0f}  /* M2006/C610 ID2 */
@@ -44,7 +45,7 @@ const PowerConfig g_power_config = {.resistance_ohm = 0.10f,
                                     .baseline_w = 5.0f,
                                     .rule_limit_w = 65.0f,
                                     .safety_margin_w = 5.0f,
-                                    .bench_limit_w = 45.0f,
+                                    .bench_limit_w = 50.0f,
                                     .buffer_target_j = 20.0f,
                                     .recharge_time_s = 1.0f,
                                     .reserve_up_tau_s = 0.05f,

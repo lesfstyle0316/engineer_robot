@@ -161,7 +161,7 @@ static void test_dji_objects() {
     can_device_transmit_member direct{};
     CHECK(net.pop(1, 0, direct) && direct.frame.data[0] == 6 && direct.frame.data[1] == 0x66);
     CHECK(!lf.motor_set_voltage(0.1f));
-    CHECK(!lf.motor_set_raw_output(3001));
+    CHECK(!lf.motor_set_raw_output(static_cast<int16_t>(g_dji_config[DJI_LF].max_command + 1.0f)));
     MotorFrame command;
     const int16_t v[4] = {100, -200, 0, 0};
     Dji_GroupFrame(&command, 1, 0x200, v);
@@ -294,7 +294,7 @@ static void test_system_replay() {
         MotorSystem_CopyFeedback(input.dji, input.dm, &input.power);
         input.rc.stamp_ms = now;
         if (now == 600) {
-            input.rc.channel[3] = 330;
+            input.rc.channel[3] = 660;
             input.rc.sw[0] = RC_UP;
             input.rc.sw[1] = RC_UP;
             input.rc.channel[0] = 330;
@@ -327,9 +327,16 @@ static void test_system_replay() {
                     }
                 CHECK(matched);
                 ++sent;
-                if (bus == 1)
+                if (bus == 1) {
+                    if (ROBOT_FRONT_WHEEL_CURRENT_TEST) {
+                        CHECK(!(msg.frame.data[4] || msg.frame.data[5] || msg.frame.data[6] || msg.frame.data[7]));
+                        if (!ROBOT_WHEEL_POWER_LIMIT_ENABLED && now >= 600 && now < 800) {
+                            CHECK(msg.frame.data[0] == 0x40 && msg.frame.data[1] == 0);
+                            CHECK(msg.frame.data[2] == 0xc0 && msg.frame.data[3] == 0);
+                        }
+                    }
                     ++frames[0];
-                else if (msg.frame.id == 0x200)
+                } else if (msg.frame.id == 0x200)
                     ++frames[1];
                 else if (msg.frame.id == 0x1ff)
                     ++frames[2];

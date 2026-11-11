@@ -7,6 +7,16 @@ void Chassis_WheelStep(const RcState *rc, const DjiFeedback dji[4], Pid speed_pi
     float left = forward + turn;
     float right = forward - turn;
     float scale = fmaxf(1.0f, fmaxf(fabsf(left), fabsf(right)));
+    if (ROBOT_FRONT_WHEEL_CURRENT_TEST) {
+        const DjiConfig *lf = &g_dji_config[DJI_LF];
+        const DjiConfig *rf = &g_dji_config[DJI_RF];
+        command[DJI_LF] = (int16_t)(left / scale * lf->direction * lf->max_command);
+        command[DJI_RF] = (int16_t)(right / scale * rf->direction * rf->max_command);
+        command[DJI_LR] = 0;
+        command[DJI_RR] = 0;
+        return;
+    }
+
     const float demand[4] = {[DJI_LF] = left, [DJI_RF] = right, [DJI_LR] = left, [DJI_RR] = right};
     for (unsigned i = 0; i < 4; i++) {
         const DjiConfig *motor = &g_dji_config[i];

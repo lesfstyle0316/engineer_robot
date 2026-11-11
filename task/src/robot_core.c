@@ -76,7 +76,13 @@ static void reset_control(RobotCore *c) {
     }
 }
 
-static void apply_wheel_power(RobotCore *c, const RobotInput *in, uint32_t now) {
+static void update_wheels(RobotCore *c, const RobotInput *in, uint32_t now) {
+    if (!ROBOT_WHEEL_POWER_LIMIT_ENABLED) {
+        Chassis_WheelStep(&in->rc, in->dji, c->speed_pid, c->dji_command);
+        c->power.k_applied = 1.0f;
+        return;
+    }
+
     int16_t request[4], measured[4], rpm[4];
     float integral[4];
     for (unsigned i = 0; i < 4; i++) {
@@ -139,7 +145,7 @@ void RobotCore_Step(RobotCore *c, const RobotInput *in, uint32_t now, RobotOutpu
     }
 
     if (c->armed) {
-        apply_wheel_power(c, in, now);
+        update_wheels(c, in, now);
         Chassis_LiftStep(c, in);
         if (full)
             Gimbal_Step(c, in, now);
@@ -147,7 +153,8 @@ void RobotCore_Step(RobotCore *c, const RobotInput *in, uint32_t now, RobotOutpu
     }
     c->stop_reason = reason ? reason : (c->armed ? 0u : ROBOT_STOP_NEUTRAL_REQUIRED);
     out->abort_pending = was_armed && !c->armed;
-    out->abort_wheel_pending = previous_power > 0.0f && c->power.k_applied == 0.0f;
+    out->abort_wheel_pending =
+        ROBOT_WHEEL_POWER_LIMIT_ENABLED && previous_power > 0.0f && c->power.k_applied == 0.0f;
     out->armed = c->armed;
     out->reason = c->stop_reason;
     out->count = MotorOutput_BuildFrames(&c->motor_output, in->dm, c->dji_command, c->dm_target,

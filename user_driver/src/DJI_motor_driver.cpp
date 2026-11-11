@@ -64,7 +64,7 @@ DJI_motor::DJI_motor(can_network &net, DJI_motor_group &group, const DjiConfig &
         valid_ = group_.claim(slot_, this);
 }
 float DJI_motor::protocol_limit() const {
-    return type_ == DJI_M3508 ? 16384.0f : (type_ == DJI_M2006 ? 10000.0f : 30000.0f);
+    return type_ == DJI_M3508 ? ROBOT_C620_MAX_COMMAND : (type_ == DJI_M2006 ? 10000.0f : 30000.0f);
 }
 bool DJI_motor::accepts_raw(int16_t value) const {
     return valid_ && std::fabs(static_cast<float>(value)) <= cfg_.max_command;
