@@ -10,13 +10,17 @@ extern "C" {
 #define ROBOT_PROFILE_CHASSIS 1u /* 四轮 + 同步后腿 */
 #define ROBOT_PROFILE_ARM 2u
 #define ROBOT_PROFILE_FULL 3u
+/* 当前上电默认：底盘调试（四轮 + 双后腿）。 */
 #ifndef ROBOT_DEFAULT_PROFILE
-#define ROBOT_DEFAULT_PROFILE ROBOT_PROFILE_RC_ONLY
+#define ROBOT_DEFAULT_PROFILE ROBOT_PROFILE_CHASSIS
 #endif
-/* 机械尚未完成：核对方向、传动比、零位、限位及驱动参数后改为 1。
- * RC_ONLY 不受此开关影响。此开关不是急停开关。 */
+/* 机械臂和全车：核对方向、传动比、零位、限位及驱动参数后改为 1。 */
 #ifndef ROBOT_CONFIG_CONFIRMED
 #define ROBOT_CONFIG_CONFIRMED 0
+#endif
+/* 仅底盘调试允许使用当前起调参数。 */
+#ifndef ROBOT_CHASSIS_CONFIG_CONFIRMED
+#define ROBOT_CHASSIS_CONFIG_CONFIRMED 1
 #endif
 /* CAN对象层容量与最长待发/邮箱驻留时间；两路分别分配固定存储。 */
 #define ROBOT_CAN_MAX_RX_PER_BUS 16u
@@ -41,12 +45,26 @@ extern "C" {
 #define ROBOT_WHEEL_ACCEL_RPM_S 2500.0f
 /* RoboSister电源管理模块：CAN2 / 标准帧0x31 / DLC4 / 大端int16。
  * 只从CAN接收功率与缓冲，不向裁判模块发送查询或配置命令。
- * 比赛必须保持REQUIRE_REFEREE=1；无裁判台架可设0，仍按45W模型限功率。 */
+ * 当前为无裁判台架调试，按45W模型限功率；比赛前改回1。 */
 #define ROBOT_POWER_CAN_BUS 2u
 #define ROBOT_POWER_CAN_ID 0x31u
 #define ROBOT_POWER_BYTE_ORDER POWER_ORDER_BIG_ENDIAN
-#define ROBOT_POWER_REQUIRE_REFEREE 1
+#define ROBOT_POWER_REQUIRE_REFEREE 0
+/* 底盘升降可选右侧、左侧或双侧联动。 */
+#ifndef ROBOT_CHASSIS_LIFT_TEST
+#define ROBOT_CHASSIS_LIFT_TEST ROBOT_LIFT_TEST_BOTH
+#endif
+/* 同步阈值使用换算后的机构角度。 */
 #define ROBOT_LIFT_MAX_SKEW_DEG 5.0f
+#define ROBOT_LIFT_RESUME_SKEW_DEG 3.0f
+#define ROBOT_LIFT_TEST_MAX_LEAD_DEG 18.0f
+/* 联动使用同一个机构角速度，当前对应左 CAN 50°/s、右 CAN 500°/s。 */
+#define ROBOT_LIFT_SYNC_SPEED_DEG_S 500.0f
+#define ROBOT_RIGHT_LIFT_TEST_SPEED_DEG_S 500.0f
+/* 必须与右侧达妙驱动器读回的 PMAX 一致，单位 rad。 */
+#ifndef ROBOT_RIGHT_LIFT_PMAX_RAD
+#define ROBOT_RIGHT_LIFT_PMAX_RAD 12.5f
+#endif
 #define ROBOT_GRIP_CONTACT_CURRENT 1200.0f /* C610 反馈原始值，待实测 */
 #define ROBOT_GRIP_HOLD_CURRENT 700.0f
 #define ROBOT_GRIP_STALL_SPEED_DEG_S 3.0f
@@ -55,8 +73,13 @@ extern "C" {
 #define ROBOT_PI 3.14159265358979323846f
 #define ROBOT_DEG2RAD (ROBOT_PI / 180.0f)
 #define ROBOT_RAD2DEG (180.0f / ROBOT_PI)
-enum { DJI_LF, DJI_RF, DJI_RR, DJI_LR, DJI_YAW, DJI_SMALL_PITCH, DJI_GRIP, DJI_COUNT };
+enum { DJI_LF, DJI_RF, DJI_LR, DJI_RR, DJI_YAW, DJI_SMALL_PITCH, DJI_GRIP, DJI_COUNT };
 enum { DM_LIFT_L, DM_LIFT_R, DM_BIG_PITCH, DM_COUNT };
+enum {
+    ROBOT_LIFT_TEST_LEFT = 1u << DM_LIFT_L,
+    ROBOT_LIFT_TEST_RIGHT = 1u << DM_LIFT_R,
+    ROBOT_LIFT_TEST_BOTH = ROBOT_LIFT_TEST_LEFT | ROBOT_LIFT_TEST_RIGHT,
+};
 enum { JOINT_YAW, JOINT_SMALL_PITCH, JOINT_GRIP, JOINT_LIFT_L, JOINT_LIFT_R, JOINT_BIG_PITCH, JOINT_COUNT };
 typedef struct {
     float kp, ki, integral_limit, output_limit;
@@ -68,11 +91,15 @@ typedef struct {
     PidConfig speed_pid;
     float max_command; /* C620 ±16384 / C610 ±10000 / GM6020 ±30000 */
 } DjiConfig;
+typedef enum { DM_MODE_PV, DM_MODE_MIT } DmMode;
 typedef struct {
     uint16_t motor_id, master_id;
     float p_max, v_max, t_max; /* 必须与达妙助手中实际值完全相同 */
-    float direction, external_reduction;
-    float velocity_limit_rad_s; /* 电机输出轴；位置速度模式使用 */
+    float direction;
+    float external_reduction; /* 达妙协议角度增量 / 机构角度增量的绝对值 */
+    float velocity_limit_rad_s; /* 输出轴，PV 命令限速或 MIT 目标斜坡上限 */
+    DmMode mode;
+    float mit_kp, mit_kd;
 } DmConfig;
 typedef struct {
     float min_deg, max_deg, boot_joint_deg, slew_deg_s;
@@ -81,6 +108,7 @@ typedef struct {
 extern const DjiConfig g_dji_config[DJI_COUNT];
 extern const DmConfig g_dm_config[DM_COUNT];
 extern const JointConfig g_joint_config[JOINT_COUNT];
+extern const JointConfig g_lift_test_config;
 #ifdef __cplusplus
 }
 #endif

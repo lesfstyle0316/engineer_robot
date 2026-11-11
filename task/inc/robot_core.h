@@ -32,12 +32,14 @@ typedef struct {
 typedef struct {
     bool armed, neutral_tracking, initialized, grip_hold;
     bool dm_origin_valid[DM_COUNT];
-    uint8_t profile;
+    uint8_t profile, lift_wait_mask;
     uint32_t stop_reason, neutral_since_ms, last_ms;
     uint32_t last_bad_frames, step_count, grip_contact_since_ms;
     bool grip_contact_tracking;
     float dm_boot_pos[DM_COUNT], joint_measured[JOINT_COUNT], joint_target[JOINT_COUNT];
+    float lift_skew_deg; /* 机构角度，左减右 */
     float wheel_reference[4];
+    float lift_test_speed_deg_s[2], lift_test_direction;
     Pid speed_pid[DJI_COUNT];
     PowerLimiter power;
     int16_t dji_command[DJI_COUNT];

@@ -10,6 +10,8 @@ extern volatile uint32_t g_robot_requested_profile;
 extern volatile uint32_t g_robot_emergency_stop;
 typedef struct {
     uint32_t heartbeat_ms, iterations, can_send_failures, max_cycle_us;
+    uint32_t rc_age_ms; /* 距最新有效遥控帧的时间，ms */
+    bool rc_online;     /* 有效且未达到60ms超时；不能只看rc.valid */
     RobotInput input;
     RobotCore controller;
     BspCanStatistics can[2];

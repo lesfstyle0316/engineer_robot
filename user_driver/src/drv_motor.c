@@ -61,10 +61,25 @@ void Dji_GroupFrame(MotorFrame *f, uint8_t bus, uint16_t id, const int16_t v[4])
         f->data[2 * i + 1] = (uint8_t)u;
     }
 }
+bool Dm_ConfigIsValid(const DmConfig *c) {
+    if (c->motor_id < 1 || c->motor_id > 15 || c->master_id > 0x7ffu ||
+        fabsf(c->direction) != 1.0f || !isfinite(c->external_reduction) || c->external_reduction <= 0 ||
+        !isfinite(c->p_max) || c->p_max <= 0 || !isfinite(c->v_max) || c->v_max <= 0 ||
+        !isfinite(c->t_max) || c->t_max <= 0 || !isfinite(c->velocity_limit_rad_s) ||
+        c->velocity_limit_rad_s <= 0)
+        return false;
+    if (c->mode == DM_MODE_PV)
+        return true;
+    return c->mode == DM_MODE_MIT && c->mit_kp >= 500.0f / 4095.0f && c->mit_kp <= 500.0f &&
+           c->mit_kd >= 5.0f / 4095.0f && c->mit_kd <= 5.0f;
+}
+uint16_t Dm_CommandId(const DmConfig *c) {
+    return c->motor_id + (c->mode == DM_MODE_PV ? 0x100u : 0u);
+}
 void Dm_SpecialFrame(MotorFrame *f, const DmConfig *c, bool enable) {
     memset(f, 0, sizeof(*f));
     f->bus = 2;
-    f->id = 0x100u + c->motor_id;
+    f->id = Dm_CommandId(c);
     f->dlc = 8;
     memset(f->data, 0xff, 8);
     f->data[7] = enable ? 0xfc : 0xfd;
@@ -77,11 +92,31 @@ static void pack_float_le(uint8_t *b, float x) {
     for (unsigned i = 0; i < 4; i++)
         b[i] = (uint8_t)(u >> (8 * i));
 }
+static unsigned dm_pack(float value, float min, float max, unsigned bits) {
+    float normalized = (fminf(fmaxf(value, min), max) - min) / (max - min);
+    return (unsigned)(normalized * (float)((1u << bits) - 1u) + 0.5f);
+}
 void Dm_PositionFrame(MotorFrame *f, const DmConfig *c, float p, float v) {
     memset(f, 0, sizeof(*f));
     f->bus = 2;
-    f->id = 0x100u + c->motor_id;
+    f->id = Dm_CommandId(c);
     f->dlc = 8;
-    pack_float_le(f->data, p);
-    pack_float_le(f->data + 4, fabsf(v));
+    if (c->mode == DM_MODE_PV) {
+        pack_float_le(f->data, p);
+        pack_float_le(f->data + 4, fabsf(v));
+        return;
+    }
+    unsigned position = dm_pack(p, -c->p_max, c->p_max, 16);
+    unsigned velocity = dm_pack(0.0f, -c->v_max, c->v_max, 12);
+    unsigned kp = dm_pack(c->mit_kp, 0.0f, 500.0f, 12);
+    unsigned kd = dm_pack(c->mit_kd, 0.0f, 5.0f, 12);
+    unsigned torque = dm_pack(0.0f, -c->t_max, c->t_max, 12);
+    f->data[0] = (uint8_t)(position >> 8);
+    f->data[1] = (uint8_t)position;
+    f->data[2] = (uint8_t)(velocity >> 4);
+    f->data[3] = (uint8_t)(((velocity & 0x0fu) << 4) | (kp >> 8));
+    f->data[4] = (uint8_t)kp;
+    f->data[5] = (uint8_t)(kd >> 4);
+    f->data[6] = (uint8_t)(((kd & 0x0fu) << 4) | (torque >> 8));
+    f->data[7] = (uint8_t)torque;
 }

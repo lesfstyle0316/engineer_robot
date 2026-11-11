@@ -27,7 +27,10 @@ typedef struct {
 bool Dji_Decode(DjiFeedback *s, const uint8_t *b, uint8_t dlc, uint32_t now);
 bool Dm_Decode(DmFeedback *s, const DmConfig *c, const uint8_t *b, uint8_t dlc, uint32_t now);
 void Dji_GroupFrame(MotorFrame *f, uint8_t bus, uint16_t id, const int16_t values[4]);
+bool Dm_ConfigIsValid(const DmConfig *c);
+uint16_t Dm_CommandId(const DmConfig *c);
 void Dm_SpecialFrame(MotorFrame *f, const DmConfig *c, bool enable);
+/* max_velocity 用于 PV。MIT 使用配置增益，速度和前馈转矩给定为 0。 */
 void Dm_PositionFrame(MotorFrame *f, const DmConfig *c, float pos, float max_velocity);
 float Dji_JointDegrees(const DjiFeedback *s, const DjiConfig *c);
 float Dm_Unpack(unsigned value, float max, unsigned bits);

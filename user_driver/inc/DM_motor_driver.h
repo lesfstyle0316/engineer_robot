@@ -9,7 +9,7 @@ class DM_motor : public motor_dev {
     bool motor_ready(uint32_t now) const override;
     void motor_stop() override;
     bool motor_enable(bool enable);
-    bool motor_set_position(float native_rad, float max_velocity_rad_s);
+    bool motor_set_position(float native_rad, float max_velocity_rad_s); /* PV */
     bool apply_frame(const MotorFrame &frame, uint32_t now);
     bool can_send_msg(uint32_t now) { return valid_ && can_tx.can_send_msg(now); }
     uint16_t command_id() const { return can_tx.member.id; }

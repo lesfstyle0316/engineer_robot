@@ -5,20 +5,37 @@
 #define BIT(n) (1u << (n))
 _Static_assert(ROBOT_DJI_PERIOD_MS >= 2u, "DJI command frequency must be below 1000Hz");
 _Static_assert(ROBOT_DM_PERIOD_MS >= DM_COUNT, "DM slots must not overlap");
+_Static_assert(ROBOT_CHASSIS_LIFT_TEST == ROBOT_LIFT_TEST_LEFT ||
+                   ROBOT_CHASSIS_LIFT_TEST == ROBOT_LIFT_TEST_RIGHT ||
+                   ROBOT_CHASSIS_LIFT_TEST == ROBOT_LIFT_TEST_BOTH,
+               "Invalid chassis lift selection");
 uint32_t RobotCore_ExpectedDji(uint8_t p) {
     return (p == ROBOT_PROFILE_CHASSIS ? 0x0fu : 0u) | (p == ROBOT_PROFILE_ARM ? 0x70u : 0u) |
            (p == ROBOT_PROFILE_FULL ? 0x7fu : 0u);
 }
 uint32_t RobotCore_ExpectedDm(uint8_t p) {
-    return p == ROBOT_PROFILE_FULL ? 7u
-                                   : (p == ROBOT_PROFILE_CHASSIS ? 3u : (p == ROBOT_PROFILE_ARM ? 4u : 0u));
+    if (p == ROBOT_PROFILE_CHASSIS)
+        return ROBOT_CHASSIS_LIFT_TEST;
+    return p == ROBOT_PROFILE_FULL ? 7u : (p == ROBOT_PROFILE_ARM ? BIT(DM_BIG_PITCH) : 0u);
+}
+static const JointConfig *joint_config(unsigned joint, uint8_t profile) {
+    if (profile == ROBOT_PROFILE_CHASSIS && (joint == JOINT_LIFT_L || joint == JOINT_LIFT_R) &&
+        (ROBOT_CHASSIS_LIFT_TEST & BIT(joint - JOINT_LIFT_L)))
+        return &g_lift_test_config;
+    return &g_joint_config[joint];
 }
 void RobotCore_Init(RobotCore *c) {
     memset(c, 0, sizeof(*c));
     c->profile = 255u;
     PowerLimiter_Init(&c->power);
 }
-static bool config_valid(void) {
+static bool joint_config_valid(const JointConfig *j) {
+    return isfinite(j->min_deg) && isfinite(j->max_deg) && j->min_deg < j->max_deg &&
+           isfinite(j->boot_joint_deg) && j->boot_joint_deg >= j->min_deg && j->boot_joint_deg <= j->max_deg &&
+           isfinite(j->slew_deg_s) && j->slew_deg_s > 0 && isfinite(j->position_kp) &&
+           j->position_kp >= 0 && isfinite(j->max_speed_deg_s) && j->max_speed_deg_s > 0;
+}
+static bool config_valid(uint8_t profile) {
     for (unsigned i = 0; i < DJI_COUNT; i++) {
         const DjiConfig *d = &g_dji_config[i];
         if (!isfinite(d->reduction) || d->reduction <= 0 || fabsf(d->direction) != 1.0f ||
@@ -42,24 +59,24 @@ static bool config_valid(void) {
             return false;
     for (unsigned i = 0; i < DM_COUNT; i++) {
         const DmConfig *d = &g_dm_config[i];
-        if (d->motor_id < 1 || d->motor_id > 15 || d->master_id > 0x7ffu || d->master_id < 0x300u ||
-            fabsf(d->direction) != 1.0f || !isfinite(d->external_reduction) || d->external_reduction <= 0 ||
-            !isfinite(d->p_max) || d->p_max <= 0 || !isfinite(d->v_max) || d->v_max <= 0 ||
-            !isfinite(d->t_max) || d->t_max <= 0 || !isfinite(d->velocity_limit_rad_s) ||
-            d->velocity_limit_rad_s <= 0)
+        if (!Dm_ConfigIsValid(d))
             return false;
+        if (d->master_id == 0x200u || d->master_id == 0x1ffu ||
+            (ROBOT_POWER_CAN_BUS == 2u && d->master_id == ROBOT_POWER_CAN_ID))
+            return false;
+        for (unsigned j = DJI_YAW; j < DJI_COUNT; j++)
+            if (d->master_id == g_dji_config[j].feedback_id)
+                return false;
+        for (unsigned j = 0; j < DM_COUNT; j++)
+            if (d->master_id == Dm_CommandId(&g_dm_config[j]))
+                return false;
         for (unsigned j = 0; j < i; j++)
             if (d->motor_id == g_dm_config[j].motor_id || d->master_id == g_dm_config[j].master_id)
                 return false;
     }
-    for (unsigned i = 0; i < JOINT_COUNT; i++) {
-        const JointConfig *j = &g_joint_config[i];
-        if (!isfinite(j->min_deg) || !isfinite(j->max_deg) || !isfinite(j->boot_joint_deg) ||
-            !isfinite(j->slew_deg_s) || j->min_deg >= j->max_deg || j->slew_deg_s <= 0 ||
-            j->boot_joint_deg < j->min_deg || j->boot_joint_deg > j->max_deg || !isfinite(j->position_kp) ||
-            j->position_kp < 0 || !isfinite(j->max_speed_deg_s) || j->max_speed_deg_s <= 0)
+    for (unsigned i = 0; i < JOINT_COUNT; i++)
+        if (!joint_config_valid(joint_config(i, profile)))
             return false;
-    }
     return true;
 }
 static void measurements(RobotCore *c, const RobotInput *in) {
@@ -76,8 +93,9 @@ static void measurements(RobotCore *c, const RobotInput *in) {
         const DmConfig *d = &g_dm_config[i];
         c->joint_measured[JOINT_LIFT_L + i] =
             (in->dm[i].position - c->dm_boot_pos[i]) * d->direction * ROBOT_RAD2DEG / d->external_reduction +
-            g_joint_config[JOINT_LIFT_L + i].boot_joint_deg;
+            joint_config(JOINT_LIFT_L + i, in->profile)->boot_joint_deg;
     }
+    c->lift_skew_deg = c->joint_measured[JOINT_LIFT_L] - c->joint_measured[JOINT_LIFT_R];
 }
 static uint32_t health(RobotCore *c, const RobotInput *in, uint32_t now, uint32_t djmask, uint32_t dmmask) {
     uint32_t why = 0;
@@ -85,7 +103,7 @@ static uint32_t health(RobotCore *c, const RobotInput *in, uint32_t now, uint32_
         in->rc.bad_frames != c->last_bad_frames)
         why |= ROBOT_STOP_RC;
     c->last_bad_frames = in->rc.bad_frames;
-    if (in->profile > ROBOT_PROFILE_FULL || !config_valid() ||
+    if (in->profile > ROBOT_PROFILE_FULL || !config_valid(in->profile) ||
         (in->profile != ROBOT_PROFILE_RC_ONLY && !in->config_confirmed))
         why |= ROBOT_STOP_CONFIG;
     if (in->emergency_stop)
@@ -126,13 +144,13 @@ static uint32_t health(RobotCore *c, const RobotInput *in, uint32_t now, uint32_
         }
     for (unsigned j = 0; j < JOINT_COUNT; j++) {
         bool used = j < 3 ? ((djmask & BIT(DJI_YAW + j)) != 0) : ((dmmask & BIT(j - JOINT_LIFT_L)) != 0);
+        const JointConfig *cfg = joint_config(j, in->profile);
         if (used &&
-            (!isfinite(c->joint_measured[j]) || c->joint_measured[j] < g_joint_config[j].min_deg - 2.0f ||
-             c->joint_measured[j] > g_joint_config[j].max_deg + 2.0f))
+            (!isfinite(c->joint_measured[j]) || c->joint_measured[j] < cfg->min_deg - 2.0f ||
+             c->joint_measured[j] > cfg->max_deg + 2.0f))
             why |= ROBOT_STOP_LIMIT;
     }
-    if ((dmmask & 3u) == 3u &&
-        fabsf(c->joint_measured[JOINT_LIFT_L] - c->joint_measured[JOINT_LIFT_R]) > ROBOT_LIFT_MAX_SKEW_DEG)
+    if (in->profile == ROBOT_PROFILE_FULL && fabsf(c->lift_skew_deg) > ROBOT_LIFT_MAX_SKEW_DEG)
         why |= ROBOT_STOP_LIFT_SKEW;
     return why;
 }
@@ -145,9 +163,13 @@ static void reset_control(RobotCore *c) {
     PowerLimiter_ResetOutput(&c->power);
     c->grip_hold = false;
     c->grip_contact_tracking = false;
-    for (unsigned j = 0; j < JOINT_COUNT; j++)
-        c->joint_target[j] =
-            Control_Clamp(c->joint_measured[j], g_joint_config[j].min_deg, g_joint_config[j].max_deg);
+    c->lift_wait_mask = 0u;
+    c->lift_test_direction = 0.0f;
+    memset(c->lift_test_speed_deg_s, 0, sizeof(c->lift_test_speed_deg_s));
+    for (unsigned j = 0; j < JOINT_COUNT; j++) {
+        const JointConfig *cfg = joint_config(j, c->profile);
+        c->joint_target[j] = Control_Clamp(c->joint_measured[j], cfg->min_deg, cfg->max_deg);
+    }
     memset(c->dm_enable_waiting, 0, sizeof(c->dm_enable_waiting));
     memset(c->dm_active_seen, 0, sizeof(c->dm_active_seen));
     memset(c->dm_preloaded, 0, sizeof(c->dm_preloaded));
@@ -165,15 +187,86 @@ static float joint_speed_target(const RobotCore *c, unsigned j) {
         v = 0;
     return v;
 }
+static void lift_travel_bounds(const RobotCore *c, unsigned side, const JointConfig *joint,
+                               float *lower, float *upper) {
+    const DmConfig *motor = &g_dm_config[side];
+    float deg_per_rad = ROBOT_RAD2DEG / motor->external_reduction;
+    float center = joint->boot_joint_deg - c->dm_boot_pos[side] * motor->direction * deg_per_rad;
+    /* 给运动边界留一个反馈 LSB，上电位置本身始终可作为返回目标。 */
+    float half_range = motor->p_max * (1.0f - 2.0f / 65535.0f) * deg_per_rad;
+    *lower = fmaxf(joint->min_deg, fminf(center - half_range, joint->boot_joint_deg));
+    *upper = fminf(joint->max_deg, fmaxf(center + half_range, joint->boot_joint_deg));
+}
+static void paired_lift_travel_bounds(const RobotCore *c, const JointConfig *left, const JointConfig *right,
+                                      float *lower, float *upper) {
+    float right_lower, right_upper;
+    lift_travel_bounds(c, DM_LIFT_L, left, lower, upper);
+    lift_travel_bounds(c, DM_LIFT_R, right, &right_lower, &right_upper);
+    *lower = fmaxf(*lower, right_lower);
+    *upper = fminf(*upper, right_upper);
+}
+static float lift_speed_limit(unsigned side) {
+    const DmConfig *motor = &g_dm_config[side];
+    return motor->velocity_limit_rad_s * ROBOT_RAD2DEG / motor->external_reduction;
+}
+static void lift_test(RobotCore *c, unsigned side, float cmd, float speed, float lower, float upper) {
+    if (cmd == 0.0f) {
+        c->lift_test_speed_deg_s[side] = 0.0f;
+        return;
+    }
+    unsigned axis = JOINT_LIFT_L + side;
+    if (c->lift_wait_mask) {
+        unsigned held_axis = side == DM_LIFT_L ? JOINT_LIFT_R : JOINT_LIFT_L;
+        float held = Control_Clamp(c->joint_target[held_axis], lower, upper);
+        if (cmd > 0.0f)
+            upper = held;
+        else
+            lower = held;
+    }
+    float previous = Control_Clamp(c->joint_target[axis], lower, upper);
+    float measured = c->joint_measured[axis];
+    float lead = ROBOT_LIFT_TEST_MAX_LEAD_DEG;
+    lower = fmaxf(lower, fminf(previous, measured - lead));
+    upper = fminf(upper, fmaxf(previous, measured + lead));
+
+    float target = Control_Clamp(previous + cmd * speed * ROBOT_CONTROL_DT, lower, upper);
+    c->joint_target[axis] = target;
+    c->lift_test_speed_deg_s[side] = (target - previous) / ROBOT_CONTROL_DT;
+}
+static void paired_lift_test(RobotCore *c, float cmd) {
+    float lower, upper;
+    paired_lift_travel_bounds(c, &g_lift_test_config, &g_lift_test_config, &lower, &upper);
+    float skew_in_travel_direction = cmd * c->lift_skew_deg;
+    float skew_abs = fabsf(c->lift_skew_deg);
+    uint8_t leader = skew_in_travel_direction > 0.0f ? ROBOT_LIFT_TEST_LEFT : ROBOT_LIFT_TEST_RIGHT;
+    uint8_t wait = c->lift_wait_mask;
+    if (cmd == 0.0f)
+        wait = 0u;
+    else if (skew_abs >= ROBOT_LIFT_MAX_SKEW_DEG)
+        wait = leader;
+    else if (skew_abs <= ROBOT_LIFT_RESUME_SKEW_DEG || wait != leader ||
+             cmd != c->lift_test_direction)
+        wait = 0u;
+
+    if (wait && (wait != c->lift_wait_mask || cmd != c->lift_test_direction)) {
+        unsigned axis = wait == ROBOT_LIFT_TEST_LEFT ? JOINT_LIFT_L : JOINT_LIFT_R;
+        c->joint_target[axis] = Control_Clamp(c->joint_measured[axis], lower, upper);
+    }
+    c->lift_wait_mask = wait;
+    c->lift_test_direction = cmd;
+    float speed = fminf(ROBOT_LIFT_SYNC_SPEED_DEG_S, fminf(lift_speed_limit(DM_LIFT_L), lift_speed_limit(DM_LIFT_R)));
+    for (unsigned side = DM_LIFT_L; side <= DM_LIFT_R; side++)
+        lift_test(c, side, (wait & BIT(side)) ? 0.0f : cmd, speed, lower, upper);
+}
 static void controls(RobotCore *c, const RobotInput *in, uint32_t now, uint32_t djmask, uint32_t dmmask) {
     const RcState *r = &in->rc;
-    for (unsigned i = 0; i < DM_COUNT; i++)
-        if ((dmmask & BIT(i)) && in->dm[i].state == 1u)
-            c->dm_active_seen[i] = true;
     if (djmask & 15u) {
         float f = Rc_Axis(r, 3) * ROBOT_RC_FORWARD_SIGN, t = Rc_Axis(r, 2) * ROBOT_RC_TURN_SIGN;
         float left = f + t, right = f - t, scale = fmaxf(1.0f, fmaxf(fabsf(left), fabsf(right)));
-        float demand[4] = {left / scale, right / scale, right / scale, left / scale};
+        float demand[4] = {
+            [DJI_LF] = left / scale, [DJI_RF] = right / scale,
+            [DJI_LR] = left / scale, [DJI_RR] = right / scale,
+        };
         float old_integral[4], error[4], requested_logical[4];
         int16_t requested[4], measured[4], rpm[4], limited[4];
         for (unsigned i = 0; i < 4; i++) {
@@ -258,12 +351,43 @@ static void controls(RobotCore *c, const RobotInput *in, uint32_t now, uint32_t 
             }
         }
     }
-    if ((dmmask & 3u) == 3u && in->dm[0].state == 1u && in->dm[1].state == 1u) {
-        uint8_t sw = r->sw[ROBOT_RC_LEFT_SWITCH];
-        float cmd = sw == RC_UP ? 1.0f : (sw == RC_DOWN ? -1.0f : 0.0f);
-        float lo = fmaxf(g_joint_config[JOINT_LIFT_L].min_deg, g_joint_config[JOINT_LIFT_R].min_deg);
-        float hi = fminf(g_joint_config[JOINT_LIFT_L].max_deg, g_joint_config[JOINT_LIFT_R].max_deg);
-        float speed = fminf(g_joint_config[JOINT_LIFT_L].slew_deg_s, g_joint_config[JOINT_LIFT_R].slew_deg_s);
+    uint8_t sw = r->sw[ROBOT_RC_LEFT_SWITCH];
+    float cmd = sw == RC_UP ? 1.0f : (sw == RC_DOWN ? -1.0f : 0.0f);
+    bool lift_pair_selected = (dmmask & ROBOT_LIFT_TEST_BOTH) == ROBOT_LIFT_TEST_BOTH;
+    bool lift_pair_ready = lift_pair_selected && in->dm[DM_LIFT_L].state == 1u &&
+                           in->dm[DM_LIFT_R].state == 1u;
+    if (in->profile == ROBOT_PROFILE_CHASSIS && lift_pair_selected) {
+        if (lift_pair_ready && c->dm_active_seen[DM_LIFT_L] && c->dm_active_seen[DM_LIFT_R]) {
+            paired_lift_test(c, cmd);
+        } else {
+            /* 先使能的一侧锁定收到使能反馈时的位置。双侧就绪时从当前姿态开始。 */
+            for (unsigned side = DM_LIFT_L; side <= DM_LIFT_R; side++)
+                if (lift_pair_ready || !c->dm_active_seen[side]) {
+                    unsigned axis = JOINT_LIFT_L + side;
+                    const JointConfig *cfg = joint_config(axis, in->profile);
+                    c->joint_target[axis] =
+                        Control_Clamp(c->joint_measured[axis], cfg->min_deg, cfg->max_deg);
+                }
+        }
+    } else if (dmmask == ROBOT_LIFT_TEST_LEFT || dmmask == ROBOT_LIFT_TEST_RIGHT) {
+        unsigned side = dmmask == ROBOT_LIFT_TEST_LEFT ? DM_LIFT_L : DM_LIFT_R;
+        if (in->dm[side].state == 1u) {
+            float lower, upper;
+            lift_travel_bounds(c, side, &g_lift_test_config, &lower, &upper);
+            float speed = side == DM_LIFT_R ? ROBOT_RIGHT_LIFT_TEST_SPEED_DEG_S : g_lift_test_config.slew_deg_s;
+            lift_test(c, side, cmd, fminf(speed, lift_speed_limit(side)), lower, upper);
+        }
+    } else if (lift_pair_ready) {
+        const JointConfig *left = &g_joint_config[JOINT_LIFT_L];
+        const JointConfig *right = &g_joint_config[JOINT_LIFT_R];
+        float lo, hi;
+        paired_lift_travel_bounds(c, left, right, &lo, &hi);
+        float speed = fminf(left->slew_deg_s, right->slew_deg_s);
+        for (unsigned i = DM_LIFT_L; i <= DM_LIFT_R; i++) {
+            const DmConfig *cfg = &g_dm_config[i];
+            if (cfg->mode == DM_MODE_MIT)
+                speed = fminf(speed, lift_speed_limit(i));
+        }
         float common = Control_Clamp((c->joint_target[JOINT_LIFT_L] + c->joint_target[JOINT_LIFT_R]) * 0.5f +
                                          cmd * speed * ROBOT_CONTROL_DT,
                                      lo, hi);
@@ -275,7 +399,9 @@ static void controls(RobotCore *c, const RobotInput *in, uint32_t now, uint32_t 
     for (unsigned i = 0; i < DM_COUNT; i++) {
         const DmConfig *cfg = &g_dm_config[i];
         unsigned j = JOINT_LIFT_L + i;
-        c->dm_target[i] = c->dm_boot_pos[i] + (c->joint_target[j] - g_joint_config[j].boot_joint_deg) *
+        if ((dmmask & BIT(i)) && in->dm[i].state == 1u)
+            c->dm_active_seen[i] = true;
+        c->dm_target[i] = c->dm_boot_pos[i] + (c->joint_target[j] - joint_config(j, in->profile)->boot_joint_deg) *
                                                   ROBOT_DEG2RAD * cfg->direction * cfg->external_reduction;
     }
 }
@@ -302,7 +428,7 @@ static void frames(RobotCore *c, const RobotInput *in, uint32_t now, RobotOutput
                     c->dm_enable_since[i] = now;
                     c->dm_enable_waiting[i] = true;
                 }
-                /* 先用当前位置预装 PV 目标，再在下一个 5ms 时隙使能。
+                /* 先用当前位置预装目标，再在下一个 5ms 时隙使能。
                  * 不发保存零点/清错命令；实际固件使能行为仍需空载验收。 */
                 if (!c->dm_preloaded[i]) {
                     Dm_PositionFrame(f, &g_dm_config[i], in->dm[i].position,

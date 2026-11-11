@@ -37,7 +37,8 @@ static void ControlTask(void *arg) {
         in.bus_fault_mask |= tx_fault_mask;
         in.profile =
             g_robot_requested_profile <= ROBOT_PROFILE_FULL ? (uint8_t)g_robot_requested_profile : 255u;
-        in.config_confirmed = ROBOT_CONFIG_CONFIRMED != 0;
+        in.config_confirmed = in.profile == ROBOT_PROFILE_CHASSIS ? ROBOT_CHASSIS_CONFIG_CONFIRMED != 0
+                                                                : ROBOT_CONFIG_CONFIRMED != 0;
         in.emergency_stop = g_robot_emergency_stop != 0 || BSP_UserEmergencyStop();
         in.hardware_limit_mask = BSP_UserLimitMask();
         RobotCore_Step(&s_core, &in, now, &out);
@@ -66,6 +67,8 @@ static void ControlTask(void *arg) {
         /* 10ms 发布一份一致的调试快照；只有该任务写 controller/input。 */
         if (s_core.step_count % 10u == 0u) {
             g_robot_debug.input = in;
+            g_robot_debug.rc_age_ms = (uint32_t)(now - in.rc.stamp_ms);
+            g_robot_debug.rc_online = in.rc.valid && g_robot_debug.rc_age_ms < ROBOT_RC_TIMEOUT_MS;
             g_robot_debug.controller = s_core;
             BspCanStatistics stats;
             BSP_CAN_GetStatistics(1, &stats);

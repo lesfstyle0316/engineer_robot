@@ -7,7 +7,7 @@ class robot_motor_devices {
   public:
     can_network &net;
     DJI_motor_group chassis_group, arm_current_group, yaw_voltage_group;
-    DJI_motor wheel_lf, wheel_rf, wheel_rr, wheel_lr, yaw, small_pitch, gripper;
+    DJI_motor wheel_lf, wheel_rf, wheel_lr, wheel_rr, yaw, small_pitch, gripper;
     DM_motor lift_left, lift_right, big_pitch;
     PowerTelemetry power{};
     can_device_receive power_rx;
@@ -15,8 +15,8 @@ class robot_motor_devices {
         : net(robot_can_network()), chassis_group(net, 1, 0x200), arm_current_group(net, 2, 0x200),
           yaw_voltage_group(net, 2, 0x1ff), wheel_lf(net, chassis_group, g_dji_config[DJI_LF], 1, DJI_M3508),
           wheel_rf(net, chassis_group, g_dji_config[DJI_RF], 2, DJI_M3508),
-          wheel_rr(net, chassis_group, g_dji_config[DJI_RR], 3, DJI_M3508),
-          wheel_lr(net, chassis_group, g_dji_config[DJI_LR], 4, DJI_M3508),
+          wheel_lr(net, chassis_group, g_dji_config[DJI_LR], 3, DJI_M3508),
+          wheel_rr(net, chassis_group, g_dji_config[DJI_RR], 4, DJI_M3508),
           yaw(net, yaw_voltage_group, g_dji_config[DJI_YAW], 1, DJI_GM6020),
           small_pitch(net, arm_current_group, g_dji_config[DJI_SMALL_PITCH], 1, DJI_M2006),
           gripper(net, arm_current_group, g_dji_config[DJI_GRIP], 2, DJI_M2006),
@@ -50,8 +50,8 @@ extern "C" void MotorSystem_CopyFeedback(DjiFeedback d[DJI_COUNT], DmFeedback m[
     auto &s = devices();
     d[DJI_LF] = s.wheel_lf.feedback();
     d[DJI_RF] = s.wheel_rf.feedback();
-    d[DJI_RR] = s.wheel_rr.feedback();
     d[DJI_LR] = s.wheel_lr.feedback();
+    d[DJI_RR] = s.wheel_rr.feedback();
     d[DJI_YAW] = s.yaw.feedback();
     d[DJI_SMALL_PITCH] = s.small_pitch.feedback();
     d[DJI_GRIP] = s.gripper.feedback();

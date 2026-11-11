@@ -208,38 +208,47 @@ static void test_dji_objects() {
 }
 static void test_dm_objects() {
     can_network net;
-    DM_motor motor(net, g_dm_config[0]);
-    CHECK(motor.valid() && !motor.motor_ready(0));
+    const DmConfig &lift_cfg = g_dm_config[DM_LIFT_L];
+    const DmConfig &pitch_cfg = g_dm_config[DM_BIG_PITCH];
+    DM_motor motor(net, lift_cfg), pitch(net, pitch_cfg);
+    CHECK(motor.valid() && pitch.valid() && !motor.motor_ready(0));
     MotorFrame command;
-    Dm_SpecialFrame(&command, &g_dm_config[0], true);
+    Dm_SpecialFrame(&command, &lift_cfg, true);
     CHECK(motor.apply_frame(command, 1));
     can_device_transmit_member msg{};
     CHECK(net.pop(2, 1, msg));
-    CHECK(msg.frame.id == 0x101 && msg.frame.data[7] == 0xfc);
-    Dm_PositionFrame(&command, &g_dm_config[0], 1.0f, 0.2f);
+    CHECK(msg.frame.id == 0x02 && msg.frame.data[7] == 0xfc);
+    Dm_PositionFrame(&command, &lift_cfg, 1.0f, 0.2f);
     CHECK(motor.apply_frame(command, 2));
     CHECK(net.pop(2, 2, msg));
     CHECK(!std::memcmp(command.data, msg.frame.data, 8));
-    CHECK(motor.motor_set_position(0.5f, 0.2f) && motor.can_send_msg(2));
+    CHECK(!pitch.apply_frame(command, 2));
+    command.data[4] ^= 1u;
+    CHECK(!motor.apply_frame(command, 2));
+    Dm_PositionFrame(&command, &pitch_cfg, 1.0f, 0.2f);
+    CHECK(!motor.apply_frame(command, 2) && pitch.apply_frame(command, 2));
+    CHECK(net.pop(2, 2, msg) && msg.frame.id == 0x103);
+    CHECK(!std::memcmp(command.data, msg.frame.data, 8));
+    CHECK(pitch.motor_set_position(0.5f, 0.2f) && pitch.can_send_msg(2));
     CHECK(net.pop(2, 2, msg));
-    CHECK(!motor.motor_set_position(NAN, 0.2f));
-    CHECK(!motor.motor_set_position(13.0f, 0.2f));
-    CHECK(!motor.motor_set_position(1, 1));
-    Dm_SpecialFrame(&command, &g_dm_config[0], false);
+    CHECK(!pitch.motor_set_position(NAN, 0.2f));
+    CHECK(!pitch.motor_set_position(13.0f, 0.2f));
+    CHECK(!pitch.motor_set_position(1, 1));
+    Dm_SpecialFrame(&command, &lift_cfg, false);
     command.data[7] = 0xfe;
     CHECK(!motor.apply_frame(command, 3));
     command.id = 0x201;
     CHECK(!motor.apply_frame(command, 3));
-    auto feedback = frame(2, 0x301);
-    const uint8_t bytes[8] = {0x11, 0x80, 0, 0x80, 0, 0, 25, 26};
+    auto feedback = frame(2, 0x03);
+    const uint8_t bytes[8] = {0x12, 0x80, 0, 0x80, 0, 0, 25, 26};
     std::memcpy(feedback.data, bytes, 8);
     CHECK(net.dispatch(feedback, 4));
     CHECK(motor.motor_ready(4));
     NEAR(motor.feedback().position, 0, 0.001f);
-    feedback.data[0] = 0x81;
+    feedback.data[0] = 0x82;
     CHECK(net.dispatch(feedback, 5));
     CHECK(!motor.motor_ready(5));
-    std::puts("PASS DM object PV/enable/disable framing, range checks, mode isolation and fault state");
+    std::puts("PASS DM object MIT/PV/enable/disable framing, range checks, mode isolation and fault state");
 }
 static void inject_feedback(uint32_t now) {
     auto &net = robot_can_network();
@@ -270,6 +279,8 @@ static void test_system_replay() {
     CHECK(MotorSystem_Init());
     auto &net = robot_can_network();
     CHECK(net.rx_count(1) == 4 && net.rx_count(2) == 7);
+    CHECK(g_dji_config[DJI_LR].feedback_id == 0x203 && g_dji_config[DJI_RR].feedback_id == 0x204);
+    CHECK(g_dm_config[DM_LIFT_R].motor_id == 0x01 && g_dm_config[DM_LIFT_R].master_id == 0x11);
     RobotCore core;
     RobotCore_Init(&core);
     RobotInput input{};
@@ -323,8 +334,13 @@ static void test_system_replay() {
                     ++frames[1];
                 else if (msg.frame.id == 0x1ff)
                     ++frames[2];
-                else
-                    ++frames[msg.frame.id - 0x101 + 3];
+                else {
+                    unsigned dm = 0;
+                    while (dm < DM_COUNT && msg.frame.id != Dm_CommandId(&g_dm_config[dm]))
+                        ++dm;
+                    CHECK(dm < DM_COUNT);
+                    ++frames[3 + dm];
+                }
             }
         }
         CHECK(sent == out.count);
