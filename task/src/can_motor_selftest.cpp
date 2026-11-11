@@ -285,7 +285,6 @@ static void test_system_replay() {
     RobotCore_Init(&core);
     RobotInput input{};
     input.profile = ROBOT_PROFILE_FULL;
-    input.config_confirmed = true;
     input.rc.valid = true;
     input.rc.sw[0] = RC_MID;
     input.rc.sw[1] = RC_MID;

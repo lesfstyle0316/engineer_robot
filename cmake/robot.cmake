@@ -6,7 +6,11 @@ set_property(TARGET ${CMAKE_PROJECT_NAME} PROPERTY SOURCES ${ROBOT_MX_SOURCES})
 target_compile_definitions(stm32cubemx INTERFACE HAL_TIM_MODULE_ENABLED)
 file(GLOB ROBOT_BSP CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/bsp/src/*.c" "${CMAKE_SOURCE_DIR}/bsp/src/*.cpp")
 file(GLOB ROBOT_DRIVERS CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/user_driver/src/*.c" "${CMAKE_SOURCE_DIR}/user_driver/src/*.cpp")
-set(ROBOT_TASKS ${CMAKE_SOURCE_DIR}/task/src/robot_core.c ${CMAKE_SOURCE_DIR}/task/src/robot_app.c)
+set(ROBOT_TASKS
+  task/src/robot_app.c
+  task/src/robot_core.c
+  task/src/chassis_control.c
+  task/src/gimbal_control.c)
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${ROBOT_BSP} ${ROBOT_DRIVERS} ${ROBOT_TASKS})
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE bsp/inc user_driver/inc task/inc)
 target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE -Wextra -Werror -Wno-unused-parameter)

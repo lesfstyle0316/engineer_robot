@@ -31,7 +31,7 @@ void BSP_CAN_AbortBus(uint8_t bus);
 /* 预留硬件接口：在 bsp_board.c 中实现接线后返回实际状态。 */
 bool BSP_UserEmergencyStop(void);
 uint32_t BSP_UserLimitMask(void);
-void BSP_StatusLed(bool armed, bool rc_ok, uint8_t profile, uint32_t now);
+void BSP_StatusLed(bool armed, uint32_t now);
 void BSP_FatalStop(void);
 #ifdef __cplusplus
 }

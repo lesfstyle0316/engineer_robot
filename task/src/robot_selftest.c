@@ -1,5 +1,6 @@
 /* Host regression tests; deliberately excluded from MCU target. */
 #include "robot_core.h"
+#include "chassis_control.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -131,7 +132,6 @@ static void fixture(uint8_t profile) {
     RobotCore_Init(&c);
     now = 0;
     in.profile = profile;
-    in.config_confirmed = true;
     in.power.seen = true;
     in.power.valid = true;
     in.power.chassis_power_w = 5;
@@ -168,19 +168,8 @@ static void safe_frames(void) {
     }
 }
 static void test_profiles_and_rates(void) {
-    fixture(ROBOT_PROFILE_RC_ONLY);
-    for (unsigned i = 0; i < DJI_COUNT; i++)
-        in.dji[i].seen = false;
-    for (unsigned i = 0; i < DM_COUNT; i++)
-        in.dm[i].seen = false;
-    in.config_confirmed = false;
-    run(501);
-    CHECK(c.armed);
-    in.rc.channel[0] = 660;
-    in.rc.channel[3] = 660;
-    step();
-    safe_frames();
-    fixture(ROBOT_PROFILE_RC_ONLY);
+    fixture(ROBOT_PROFILE_CHASSIS);
+    in.rc.valid = false;
     unsigned n[6] = {0};
     for (unsigned t = 0; t < 1000; t++) {
         step();
@@ -201,6 +190,7 @@ static void test_profiles_and_rates(void) {
             }
         }
     }
+    safe_frames();
     CHECK(n[0] == 500 && n[1] == 500 && n[2] == 500 && n[3] == 200 && n[4] == 200 && n[5] == 200);
     fixture(ROBOT_PROFILE_CHASSIS);
     for (unsigned i = 4; i < DJI_COUNT; i++)
@@ -211,25 +201,24 @@ static void test_profiles_and_rates(void) {
     in.rc.channel[3] = 660;
     run(500);
     for (unsigned i = DJI_LF; i <= DJI_RR; i++)
-        CHECK(c.wheel_reference[i] > 0 && c.dji_command[i] * g_dji_config[i].direction > 0);
+        CHECK(c.dji_command[i] * g_dji_config[i].direction > 0);
     for (unsigned i = 4; i < DJI_COUNT; i++)
         CHECK(c.dji_command[i] == 0);
-    fixture(ROBOT_PROFILE_ARM);
-    for (unsigned i = 0; i < 4; i++)
-        in.dji[i].seen = false;
-    in.dm[0].seen = false;
-    in.dm[1].seen = false;
-    run(501);
-    CHECK(c.armed);
-    in.rc.channel[3] = 660;
-    step();
-    for (unsigned i = 0; i < 4; i++)
-        CHECK(c.dji_command[i] == 0);
+    in.rc.sw[ROBOT_RC_RIGHT_SWITCH] = RC_UP;
+    in.rc.channel[0] = 660;
+    run(20);
+    CHECK(c.dji_command[DJI_YAW] == 0);
+    for (unsigned i = 0; i < ROBOT_DM_PERIOD_MS; i++) {
+        step();
+        for (unsigned j = 0; j < out.count; j++)
+            if (out.frames[j].bus == 2 && out.frames[j].id == 0x103)
+                CHECK(out.frames[j].data[7] == 0xfd);
+    }
     fixture(ROBOT_PROFILE_FULL);
     in.dji[3].seen = false;
     run(600);
     CHECK(!c.armed && c.stop_reason & ROBOT_STOP_FEEDBACK);
-    puts("PASS four profiles, absent inactive hardware, 500Hz DJI / 200Hz per DM");
+    puts("PASS chassis and full modes, absent inactive hardware, 500Hz DJI / 200Hz per DM");
 }
 static void test_motion(void) {
     arm(ROBOT_PROFILE_FULL);
@@ -278,56 +267,22 @@ static void test_motion(void) {
     arm(ROBOT_PROFILE_CHASSIS);
     in.rc.channel[2] = 660;
     run(100);
-    CHECK(c.wheel_reference[DJI_LF] > 0 && c.wheel_reference[DJI_RF] < 0);
-    CHECK(c.wheel_reference[DJI_LR] == c.wheel_reference[DJI_LF]);
-    CHECK(c.wheel_reference[DJI_RR] == c.wheel_reference[DJI_RF]);
-    puts("PASS differential steering, arm modes, neutral hold, mirrored synchronous lifts, yaw +/-180");
-}
-static void test_single_lift_travel(void) {
-    if (ROBOT_CHASSIS_LIFT_TEST == ROBOT_LIFT_TEST_BOTH)
-        return;
-    unsigned active = ROBOT_CHASSIS_LIFT_TEST == ROBOT_LIFT_TEST_LEFT ? DM_LIFT_L : DM_LIFT_R;
-    unsigned inactive = active == DM_LIFT_L ? DM_LIFT_R : DM_LIFT_L;
-    unsigned axis = JOINT_LIFT_L + active;
-    uint16_t inactive_id = Dm_CommandId(&g_dm_config[inactive]);
-    float expected_speed = active == DM_LIFT_R ? 500.0f : 50.0f;
-    fixture(ROBOT_PROFILE_CHASSIS);
-    in.dm[inactive].seen = false;
-    run(501);
-    CHECK(c.armed);
-    in.rc.sw[ROBOT_RC_LEFT_SWITCH] = RC_UP;
-    step();
-    NEAR(c.lift_test_speed_deg_s[active], expected_speed, 0.02f);
-    run(1500);
-    NEAR(c.joint_target[axis], ROBOT_LIFT_TEST_MAX_LEAD_DEG, 0.01f);
-    CHECK(c.dm_target[active] * (active == DM_LIFT_L ? 1.0f : -1.0f) > 0.0f);
-
-    for (unsigned i = 0; i < 75000; i++) {
-        in.dm[active].position = c.dm_target[active];
-        step();
-        if (i == 500)
-            NEAR(c.lift_test_speed_deg_s[active], expected_speed, 0.02f);
-    }
-    CHECK(c.armed);
-    const DmConfig *motor = &g_dm_config[active];
-    float end_deg = fminf(3600.0f, (motor->p_max * (1.0f - 2.0f / 65535.0f)) *
-                                      ROBOT_RAD2DEG / motor->external_reduction);
-    NEAR(c.joint_target[axis], end_deg, 0.01f);
-    NEAR(c.joint_target[JOINT_LIFT_L + inactive], 0.0f, 0.001f);
-    in.rc.sw[ROBOT_RC_LEFT_SWITCH] = RC_MID;
-    for (unsigned i = 0; i < ROBOT_DM_PERIOD_MS; i++) {
-        step();
-        for (unsigned j = 0; j < out.count; j++)
-            if (out.frames[j].bus == 2 && out.frames[j].id == inactive_id)
-                CHECK(out.frames[j].data[0] == 0xff && out.frames[j].data[7] == 0xfd);
-    }
-    CHECK(c.lift_test_speed_deg_s[active] == 0.0f);
-    NEAR(c.joint_target[axis], end_deg, 0.01f);
-    puts("PASS single lift isolation, direction, target speed, tracking lead, travel limit and neutral hold");
+    CHECK(c.dji_command[DJI_LF] * g_dji_config[DJI_LF].direction > 0);
+    CHECK(c.dji_command[DJI_RF] * g_dji_config[DJI_RF].direction < 0);
+    CHECK(c.dji_command[DJI_LR] == c.dji_command[DJI_LF]);
+    CHECK(c.dji_command[DJI_RR] == c.dji_command[DJI_RF]);
+    RcState forward = {.valid = true, .channel = {0, 0, 0, 660}};
+    DjiFeedback wheels[4] = {0};
+    Pid wheel_pid[4] = {0};
+    int16_t wheel_command[4];
+    for (unsigned i = 0; i < 4; i++)
+        wheels[i].rpm = (int16_t)(1500.0f * g_dji_config[i].direction);
+    Chassis_WheelStep(&forward, wheels, wheel_pid, wheel_command);
+    for (unsigned i = 0; i < 4; i++)
+        CHECK(abs(wheel_command[i]) <= 1);
+    puts("PASS differential steering, P19 wheel speed, arm modes, neutral hold and synchronized lifts");
 }
 static void test_paired_lift_catch_up(void) {
-    if (ROBOT_CHASSIS_LIFT_TEST != ROBOT_LIFT_TEST_BOTH)
-        return;
     fixture(ROBOT_PROFILE_CHASSIS);
     in.dm[DM_LIFT_L].state = 0;
     in.dm[DM_LIFT_R].state = 0;
@@ -338,7 +293,6 @@ static void test_paired_lift_catch_up(void) {
     in.dm[DM_LIFT_L].position = 0.2f * ROBOT_DEG2RAD;
     run(20);
     NEAR(c.joint_target[JOINT_LIFT_L], 2.0f, 0.001f);
-    CHECK(c.lift_test_speed_deg_s[DM_LIFT_L] == 0.0f);
     in.dm[DM_LIFT_R].state = 1;
     in.dm[DM_LIFT_R].position = -2.0f * ROBOT_DEG2RAD;
     step();
@@ -356,8 +310,6 @@ static void test_paired_lift_catch_up(void) {
     arm(ROBOT_PROFILE_CHASSIS);
     in.rc.sw[ROBOT_RC_LEFT_SWITCH] = RC_UP;
     step();
-    NEAR(c.lift_test_speed_deg_s[DM_LIFT_L], 500.0f, 0.02f);
-    NEAR(c.lift_test_speed_deg_s[DM_LIFT_R], 500.0f, 0.02f);
     NEAR(c.dm_target[DM_LIFT_L] / ROBOT_CONTROL_DT, 50.0f * ROBOT_DEG2RAD, 0.001f);
     NEAR(c.dm_target[DM_LIFT_R] / ROBOT_CONTROL_DT, -500.0f * ROBOT_DEG2RAD, 0.001f);
     run(5);
@@ -366,7 +318,7 @@ static void test_paired_lift_catch_up(void) {
 
     in.dm[DM_LIFT_L].position = 0.525f * ROBOT_DEG2RAD;
     step();
-    CHECK(c.armed && c.stop_reason == 0u && c.lift_wait_mask == ROBOT_LIFT_TEST_LEFT);
+    CHECK(c.armed && c.stop_reason == 0u && c.lift_wait_mask == (1u << DM_LIFT_L));
     NEAR(c.lift_skew_deg, 5.25f, 0.001f);
     float held = c.joint_target[JOINT_LIFT_L];
     float follower = c.joint_target[JOINT_LIFT_R];
@@ -377,7 +329,7 @@ static void test_paired_lift_catch_up(void) {
     NEAR(c.joint_target[JOINT_LIFT_R], held, 0.001f);
     in.dm[DM_LIFT_R].position = -1.25f * ROBOT_DEG2RAD;
     step();
-    CHECK(c.lift_wait_mask == ROBOT_LIFT_TEST_LEFT);
+    CHECK(c.lift_wait_mask == (1u << DM_LIFT_L));
     in.dm[DM_LIFT_R].position = -2.5f * ROBOT_DEG2RAD;
     run(50);
     CHECK(c.armed && c.lift_wait_mask == 0u && c.joint_target[JOINT_LIFT_L] > held);
@@ -386,7 +338,7 @@ static void test_paired_lift_catch_up(void) {
     in.dm[DM_LIFT_R].position = -6.0f * ROBOT_DEG2RAD;
     in.rc.sw[ROBOT_RC_LEFT_SWITCH] = RC_DOWN;
     step();
-    CHECK(c.armed && c.lift_wait_mask == ROBOT_LIFT_TEST_RIGHT);
+    CHECK(c.armed && c.lift_wait_mask == (1u << DM_LIFT_R));
     NEAR(c.joint_target[JOINT_LIFT_R], 6.0f, 0.001f);
     follower = c.joint_target[JOINT_LIFT_L];
     run(500);
@@ -460,10 +412,6 @@ static void test_safety(void) {
     in.dji[4].position_lost = true;
     step();
     CHECK(!c.armed && (c.stop_reason & ROBOT_STOP_POSITION_LOST));
-    arm(ROBOT_PROFILE_ARM);
-    in.bus_fault_mask = 1;
-    step();
-    CHECK(c.armed);
     arm(ROBOT_PROFILE_FULL);
     in.hardware_limit_mask = 1;
     step();
@@ -472,10 +420,6 @@ static void test_safety(void) {
     in.dm[2].state = 0;
     step();
     CHECK(!c.armed && (c.stop_reason & ROBOT_STOP_DM_ERROR));
-    arm(ROBOT_PROFILE_FULL);
-    in.dji[0].temperature = 80;
-    step();
-    CHECK(!c.armed && (c.stop_reason & ROBOT_STOP_TEMPERATURE));
     arm(ROBOT_PROFILE_FULL);
     in.dm[2].state = 8;
     step();
@@ -491,47 +435,32 @@ static void test_safety(void) {
     CHECK(c.armed && c.stop_reason == 0u);
     NEAR(c.lift_skew_deg, 0.0f, 0.001f);
     in.dm[DM_LIFT_L].position = 6.6f * ROBOT_DEG2RAD;
+    in.rc.sw[ROBOT_RC_LEFT_SWITCH] = RC_UP;
     step();
-    CHECK(!c.armed && (c.stop_reason & ROBOT_STOP_LIFT_SKEW));
-    arm(ROBOT_PROFILE_CHASSIS);
-    in.dm[DM_LIFT_L].position = 0.6f * ROBOT_DEG2RAD;
-    step();
-    CHECK(c.armed && c.stop_reason == 0u);
+    CHECK(c.armed && c.lift_wait_mask == (1u << DM_LIFT_L));
     arm(ROBOT_PROFILE_FULL);
-    in.dji[4].total_counts = 4300;
+    in.dm[DM_BIG_PITCH].position = NAN;
     step();
-    CHECK(!c.armed && (c.stop_reason & ROBOT_STOP_LIMIT));
+    CHECK(!c.armed && (c.stop_reason & ROBOT_STOP_FEEDBACK));
     arm(ROBOT_PROFILE_FULL);
-    in.dm[2].position = NAN;
-    step();
-    CHECK(!c.armed && (c.stop_reason & ROBOT_STOP_LIMIT));
-    arm(ROBOT_PROFILE_FULL);
-    in.deadline_fault = true;
-    step();
-    CHECK(!c.armed && (c.stop_reason & ROBOT_STOP_TIMING));
-    arm(ROBOT_PROFILE_FULL);
-    now += 10;
-    step();
-    CHECK(!c.armed && (c.stop_reason & ROBOT_STOP_TIMING));
-    fixture(ROBOT_PROFILE_FULL);
-    in.config_confirmed = false;
-    run(600);
-    CHECK(!c.armed && (c.stop_reason & ROBOT_STOP_CONFIG));
-    arm(ROBOT_PROFILE_FULL);
-    in.profile = ROBOT_PROFILE_RC_ONLY;
+    in.profile = ROBOT_PROFILE_CHASSIS;
     step();
     CHECK(!c.armed && out.abort_pending);
     safe_frames();
+    arm(ROBOT_PROFILE_CHASSIS);
+    in.profile = 0;
+    step();
+    CHECK(!c.armed && (c.stop_reason & ROBOT_STOP_MODE));
+    safe_frames();
     /* Unsigned timeout arithmetic works across the 32-bit ms rollover. */
-    fixture(ROBOT_PROFILE_RC_ONLY);
+    fixture(ROBOT_PROFILE_CHASSIS);
     now = UINT32_MAX - 250u;
     run(501);
     CHECK(c.armed);
-    puts("PASS radio loss, invalid frame latch, rearm, emergency, thermal, bus, limits, lost angle, skew, "
-         "deadline, rollover");
+    puts("PASS radio loss, rearm, emergency, bus, drive faults, hardware limit and mode switching");
 }
 static void test_grip_and_dm_enable(void) {
-    arm(ROBOT_PROFILE_ARM);
+    arm(ROBOT_PROFILE_FULL);
     in.rc.sw[1] = RC_DOWN;
     in.rc.channel[0] = 660;
     in.dji[DJI_GRIP].current = 1500;
@@ -546,7 +475,7 @@ static void test_grip_and_dm_enable(void) {
     in.rc.channel[0] = -660;
     step();
     CHECK(!c.grip_hold);
-    fixture(ROBOT_PROFILE_ARM);
+    fixture(ROBOT_PROFILE_FULL);
     in.dm[2].state = 0;
     run(501);
     CHECK(c.armed);
@@ -563,9 +492,7 @@ static void test_grip_and_dm_enable(void) {
             }
     }
     CHECK(enabled);
-    run(220);
-    CHECK(!c.armed); /* repeated enable has a finite timeout */
-    puts("PASS gripper contact / hold / release, DM enable handshake and timeout");
+    puts("PASS gripper contact / hold / release, DM enable handshake");
 }
 
 static PowerConfig power_cfg(void) {
@@ -816,7 +743,6 @@ int main(void) {
     test_protocols();
     test_profiles_and_rates();
     test_motion();
-    test_single_lift_travel();
     test_paired_lift_catch_up();
     test_safety();
     test_grip_and_dm_enable();

@@ -35,10 +35,9 @@ static void ControlTask(void *arg) {
         memcpy(in.dm, snapshot.dm, sizeof(in.dm));
         in.bus_fault_mask = snapshot.bus_fault_mask;
         in.bus_fault_mask |= tx_fault_mask;
-        in.profile =
-            g_robot_requested_profile <= ROBOT_PROFILE_FULL ? (uint8_t)g_robot_requested_profile : 255u;
-        in.config_confirmed = in.profile == ROBOT_PROFILE_CHASSIS ? ROBOT_CHASSIS_CONFIG_CONFIRMED != 0
-                                                                : ROBOT_CONFIG_CONFIRMED != 0;
+        uint32_t requested = g_robot_requested_profile;
+        in.profile = requested == ROBOT_PROFILE_CHASSIS || requested == ROBOT_PROFILE_FULL
+                         ? (uint8_t)requested : 0u;
         in.emergency_stop = g_robot_emergency_stop != 0 || BSP_UserEmergencyStop();
         in.hardware_limit_mask = BSP_UserLimitMask();
         RobotCore_Step(&s_core, &in, now, &out);
@@ -47,19 +46,12 @@ static void ControlTask(void *arg) {
         else if (out.abort_wheel_pending)
             BSP_CAN_AbortBus(1u);
         tx_fault_mask = 0;
-        uint32_t djmask = RobotCore_ExpectedDji(in.profile), dmmask = RobotCore_ExpectedDm(in.profile);
-        uint8_t active_buses = ((djmask & 15u) ? 1u : 0u) | (((djmask & 0x70u) || dmmask) ? 2u : 0u);
         for (unsigned i = 0; i < out.count; i++)
             if (!BSP_CAN_Send(&out.frames[i])) {
                 ++g_robot_debug.can_send_failures;
-                uint8_t failed_bus = (uint8_t)(1u << (out.frames[i].bus - 1u));
-                tx_fault_mask |= failed_bus;
-                /* 本轮剩余帧可能仍是动作帧：立刻中止，下一轮执行停机。 */
-                if (failed_bus & active_buses) {
-                    BSP_CAN_AbortAll();
-                    break;
-                }
-                BSP_CAN_AbortBus(out.frames[i].bus);
+                tx_fault_mask = (uint8_t)(1u << (out.frames[i].bus - 1u));
+                BSP_CAN_AbortAll();
+                break;
             }
         s_heartbeat = now;
         g_robot_debug.heartbeat_ms = now;
@@ -91,11 +83,8 @@ static void ServiceTask(void *arg) {
             /* 读取控制器标志的临界区极短，不读取中途更新的大结构。 */
             taskENTER_CRITICAL();
             bool armed = s_core.armed;
-            uint8_t profile = s_core.profile;
             taskEXIT_CRITICAL();
-            bool rc_ok = g_robot_debug.input.rc.valid &&
-                         (uint32_t)(now - g_robot_debug.input.rc.stamp_ms) < ROBOT_RC_TIMEOUT_MS;
-            BSP_StatusLed(armed, rc_ok, profile, now);
+            BSP_StatusLed(armed, now);
         }
         vTaskDelay(pdMS_TO_TICKS(20));
     }

@@ -10,10 +10,10 @@
 
 1. 用 CLion 打开本目录的 `CMakeLists.txt`，采用提供的 `CMakePresets.json` 中 Debug 配置。工具链为 ARM GCC，不使用桌面 MinGW 生成固件。默认工具路径对应本机已有的 CubeCLT。
 2. 也可以在 PowerShell 执行 `powershell -ExecutionPolicy Bypass -File .\Build.ps1`。Release 使用 `-Configuration Release`。更换工具安装路径时，传入 `-CubeCltRoot`，并相应修改 CMakePresets 的工具路径。
-3. 固件位于 `build/Debug/engineer_robot.elf`、`.hex`、`.bin`。如只需验证遥控器，先切换到 RC_ONLY 再编译烧录。SWD 可使用 ST-Link；`openocd.cfg` 提供连接配置，需按自己的调试器接线选择复位方式。
-4. 接好 DR16 与 C 板专用 DBUS 接口，打开遥控器。在 CLion 观察 `g_robot_debug.input.rc`，核对通道与左右开关。RC_ONLY 模式无需连接电机即可测试遥控器。
-5. 确认四个摇杆轴回中、两个拨杆都居中，保持 500ms。此后状态可解锁；RC_ONLY 仍只发送零输出和失能帧。
-6. 底盘调试前，核对下文的电机 ID、达妙控制模式和后腿行程。调试机械臂或全车前，核对机械参数，再将 `ROBOT_CONFIG_CONFIRMED` 改为 1，选择对应模式并重新编译。
+3. 固件位于 `build/Debug/engineer_robot.elf`、`.hex`、`.bin`。SWD 可使用 ST-Link；`openocd.cfg` 提供连接配置，需按自己的调试器接线选择复位方式。
+4. 接好 DR16 与 C 板专用 DBUS 接口，打开遥控器。在 CLion 观察 `g_robot_debug.input.rc`，核对通道与左右开关。
+5. 确认四个摇杆轴回中、两个拨杆都居中，保持 500ms。所选模式所需的电机反馈正常时即可解锁。
+6. 核对下文的电机 ID、达妙控制模式和机械行程。按需要选择底盘模式或整车模式。
 
 ## 三个应用文件夹
 
@@ -37,7 +37,10 @@ user_driver/src/motor_system.cpp     十台电机和裁判接收对象的集中�
 user_driver/inc/src robot_config     ID、方向、传动比、PID与模式配置
 user_driver/inc/src drv_motor       C协议编解码函数，供对象层复用
 user_driver/inc/src drv_rc/drv_pid/drv_power 遥控器、PI与四轮功率模型
-task/inc/src robot_core       整车控制、限功率、保护与500/200Hz时序
+user_driver/inc/src motor_output    电机发帧、使能与500/200Hz时序
+task/inc/src chassis_control  差速解算、四轮速度PI和后腿联动
+task/inc/src gimbal_control   云台各轴控制和夹爪保持
+task/inc/src robot_core       模式协调、关控和四轮速度PI后的功率限制
 task/inc/src robot_app        控制/维护任务和调试状态
 task/src/robot_selftest.c     原功能与功率主机测试，不编入固件
 task/src/can_motor_selftest.cpp 对象/队列/控制器回放测试，不编入固件
@@ -63,20 +66,16 @@ GM6020明确使用电压接口motor_set_voltage；M3508/M2006使用motor_set_cur
 
 生成的Core/Inc、Core/Src、Drivers和Middlewares仍属于CubeMX基础框架。应用C/C++都在上述三个文件夹，参考工程的任务与陀螺仪依赖未接入本工程。
 
-## 四种测试模式
+## 运行模式
 
-只改 `user_driver/inc/robot_config.h` 的 `ROBOT_DEFAULT_PROFILE`，或在调试器实时设置 `g_robot_requested_profile`。
+在 `user_driver/inc/robot_config.h` 设置 `ROBOT_DEFAULT_PROFILE`。调试时也可写 `g_robot_requested_profile`。
 
 | 值 | 宏 | 运行范围 | 需要反馈的电机 |
 |---|---|---|---|
-| 0 | ROBOT_PROFILE_RC_ONLY | 仅接收与观察遥控器 | 无 |
-| 1 | ROBOT_PROFILE_CHASSIS | 四轮 + 升降 | CAN1 四台3508、CAN2 所选侧4310。双侧联动时需要两台4310。 |
-| 2 | ROBOT_PROFILE_ARM | yaw、大pitch、小pitch、夹爪 | CAN2的6020、6006和两台2006 |
-| 3 | ROBOT_PROFILE_FULL | 全车 | 全部十台电机 |
+| 1 | ROBOT_PROFILE_CHASSIS | 四轮与双后腿 | 四台3508、两台4310 |
+| 3 | ROBOT_PROFILE_FULL | 底盘与云台 | 全部十台电机 |
 
-切换模式会立即撤掉动作输出，随后需所有操纵件回中 500ms。未选中的电机持续收到零输出或失能命令，其反馈缺失不阻止所选模块测试。未使用总线没有电机提供 ACK 时，可以看到该总线错误计数增加；它不会阻止另一条有效总线的独立测试。
-
-当前默认值是 `ROBOT_PROFILE_CHASSIS`。`ROBOT_CHASSIS_CONFIG_CONFIRMED=1` 允许使用现有底盘参数调试。`ROBOT_CONFIG_CONFIRMED=0` 时，ARM 和 FULL 模式报告配置未确认。
+默认是底盘模式。切换模式时撤掉当前动作输出，摇杆和拨杆回中 500ms 后解锁。底盘模式向云台发送零输出或失能指令。
 
 ## 遥控器映射
 
@@ -93,6 +92,8 @@ DBUS 通道0为右水平、1为右竖直、2为左水平、3为左竖直。协�
 | 对应摇杆轴回中 | 停止增加关节角目标，闭环保持已有目标 |
 
 底盘和后腿不依赖右拨杆是否处于模式一或二。模式切换时，未被操作的关节持续保持目标。默认夹爪右推夹紧、左推松开；方向、各摇杆符号都在配置入口可改。
+
+四台 M3508 使用 P19 减速箱，精确减速比为 3591/187。底盘按 `ROBOT_WHEEL_MAX_OUTPUT_RPM` 解算轮端目标，乘减速比后与 C620 转子转速反馈做速度 PI。当前轮端最高目标约 78.1 rpm，对应转子 1500 rpm。
 
 ## 总线与电机编号
 
@@ -169,7 +170,7 @@ HAL毫秒时基由BSP的TIM7实现，SysTick留给FreeRTOS。本机CubeMX命令�
 
 大疆电机通过转子编码器跨圈累计角度，M2006再除总减速比。DJI机械臂电机反馈丢失达到50ms后，本次上电的多圈位置被判为不可信，需检查姿态后重启；回中无法清除此类位置丢失标志。遥控器断开但电机反馈一直正常时，则可按回中流程重新解锁。
 
-底盘当前设为 `ROBOT_CHASSIS_LIFT_TEST=ROBOT_LIFT_TEST_BOTH`，左右后腿联动。在最低位上电，左拨杆上拨抬升，下拨回到各自上电位置。全行程目标为左侧 CAN +360°、右侧 CAN −3600°。右侧从 CAN 位置约 0 rad 出发需要大于 62.83 rad 的 PMAX；将驱动器实测值填入 `ROBOT_RIGHT_LIFT_PMAX_RAD`。默认 12.5 rad 时，双侧在右侧可编码行程上限一起保持。双侧联动用 `ROBOT_LIFT_SYNC_SPEED_DEG_S` 设置机构目标速度。当前 CAN 角速度为左 50°/s、右 500°/s。右侧单测 CAN 目标速度为 500°/s。软件目标不做加减速限幅。双侧联动时，等两侧使能反馈均正常后，从当时的位置开始执行拨杆动作。抬升或下降中，换算后的机构角差达到 5° 时领先侧保持，落后侧继续追赶，角差缩到 3° 后双侧恢复。左 CAN +6° 与右 CAN −60° 对应相同的机构位移。可在 `g_robot_debug.controller.lift_skew_deg` 查看左减右的机构角差。拨杆居中时双侧保持当前目标。设为 `ROBOT_LIFT_TEST_LEFT` 或 `ROBOT_LIFT_TEST_RIGHT` 可单侧试转。全车模式在角差超过 5° 时停机。
+底盘和整车模式共用双后腿联动。两侧在最低位上电，左拨杆上拨抬升，下拨回到各自上电位置。全行程目标为左侧 CAN +360°、右侧 CAN −3600°。将右侧驱动器读回的 PMAX 填入 `ROBOT_RIGHT_LIFT_PMAX_RAD`。从 CAN 位置约 0 rad 出发，右侧全行程需要大于 62.83 rad 的 PMAX，实际运动使用双侧可编码行程的交集。联动速度在 `ROBOT_LIFT_SYNC_SPEED_DEG_S` 设置，当前对应左侧 CAN 50°/s、右侧 CAN 500°/s。两侧使能后才执行拨杆动作。换算后的角差达到 5° 时领先侧等候，缩到 3° 后恢复。拨杆居中时两侧各自保持目标。
 
 夹爪在合拢命令下检测“反馈电流超过阈值、速度较低并持续150ms”，然后改为限流保持；摇杆回中和切换模式后保持此夹紧状态，反向操作松开。未检测接触时保持位置目标。阈值、保持电流和开合范围均需实测，不能用电机堵转代替永久机械限位。
 
@@ -182,30 +183,13 @@ uint32_t BSP_UserLimitMask(void);  // 默认0，任一非0位触发全局停机
 
 这两个默认实现没有实际接线。它们是输入接口，不表示已经有硬件限位。硬限位触发后不自动后退、不自动回零；清除限位条件后才允许回中解锁。
 
-## 关控与故障保护
+## 关控
 
-- 60ms未收到有效遥控帧，或收到长度/通道范围/拨杆异常帧，退出解锁状态；即使坏帧后立即又来了好帧，也保留这次事件用于停机。
-- 所选模块的任一电机50ms无反馈，或驱动报错、已使能达妙突然失能、温度过限、总线异常、软限位越界、后腿角差保护触发，停止所选动作，并对全部电机发送安全命令。
-- 停止时先中止硬件邮箱中尚未发出的动作报文，之后大疆发零电流/零电压、达妙发FD失能，清理PI积分和夹爪夹紧状态。
-- 保护判定每1ms执行。无线超时阈值后，安全大疆命令按2ms周期发送，达妙按每台5ms周期发送；这些是软件调度周期，实际收到仍取决于总线健康状况。已经在总线上传输的帧无法撤回。
-- 故障消失后四个摇杆轴和两个拨杆都需回中500ms。右拨杆居中在正常运行时只是保持机械臂，不是全局急停。
-- 可在调试器设 `g_robot_emergency_stop=1` 强制停止，清回0后仍需回中。它不替代独立硬件急停。
+- 遥控信号无效或超时 60ms、运行所需电机反馈无效或超时 50ms、达妙报故障或意外失能、CAN 故障、急停或硬限位触发时撤去驱动。云台多圈位置丢失后需重新建立上电位置。
+- 停止时清掉待发动作，大疆发送零电流或零电压，达妙发送 FD 失能。恢复后摇杆和拨杆回中 500ms 才重新解锁。达妙驱动器的通信超时用于总线断开时失能。
+- 机构目标受配置行程和达妙 PMAX 约束。升降角差用于同步等候。四轮功率限制在速度 PI 后独立执行。
 
-C610反馈协议没有温度字段，本工程不把其保留字节当成温度；软件温度检测仅适用于提供温度反馈的电机。
-
-C620/C610/GM6020协议中没有与达妙FD等价的统一失能帧，软件用零电流/零电压撤去驱动力。CAN断线、MCU失电时不能保证软件指令送达；必须启用达妙驱动器通信超时保护，并验收各大疆驱动器实际的断联行为。撤去驱动力不会继续支撑机械臂或后腿，需由机械制动、支撑等设计处理失能后的受力。
-
-`g_robot_debug.controller.stop_reason` 为位掩码：1遥控器，2反馈超时，4过温，8达妙状态，16总线，32急停，64配置，128多圈位置丢失，256限位，512后腿不同步，1024等待回中，2048任务时序异常。多个原因可叠加。
-
-## 仅监测遥控器
-
-把 `ROBOT_DEFAULT_PROFILE` 设为 `ROBOT_PROFILE_RC_ONLY` 后重新编译并烧录。确认 `g_robot_requested_profile` 和 `g_robot_debug.input.profile` 都为 0。
-
-在CLion观察g_robot_debug.rc_online（应为true）和rc_age_ms（通常几毫秒，必须小于60）。展开g_robot_debug.input.rc：sequence应持续增长，bad_frames正常运行不应持续增加；channel[0]/[1]为右摇杆水平/竖直，channel[2]/[3]为左摇杆水平/竖直，回中约0、满行程约-660到660。sw[0]左拨杆、sw[1]右拨杆，上/中/下分别为1/3/2。调试快照10ms更新，sequence可一次跳过多个帧号。
-
-关闭遥控器后，sequence应停止增长，rc_age_ms增加，约60ms后rc_online变false。rc.valid只代表最后一次帧解码结果，断流后可能仍为true，因此在线判断应使用rc_online。首次尚未收到有效帧时，sequence=0且rc_online=false。
-
-观察持续变化需要程序保持运行；暂停在断点时调试变量也停止更新。只观察遥控数据无需等待回中解锁。RC_ONLY仍会定时发送大疆零输出/达妙失能帧，未连接CAN电机时的CAN错误计数不作为遥控器好坏的依据。
+`g_robot_debug.controller.stop_reason` 记录当前停机原因。1 为遥控，2 为反馈，8 为达妙状态，16 为总线，32 为急停，64 为模式值无效，128 为多圈位置丢失，256 为硬限位，1024 为等待回中。
 
 ## 调试与验收
 
@@ -219,7 +203,7 @@ C620/C610/GM6020协议中没有与达妙FD等价的统一失能帧，软件用�
 powershell -ExecutionPolicy Bypass -File .\Test.ps1
 ```
 
-它使用本机CLion自带的桌面MinGW运行真实的协议和控制核心，覆盖四种模式、频率、关控恢复、报文、限位、夹紧和多种故障。新增功率测试还覆盖原算法例题、10000组随机模型及整数命令回代、裁判反馈与缓冲保护，并验证升降和机械臂未参与功率缩放。它不能验证电机固件、接线、CAN物理层、机械行程、真实功率或PID稳定性。
+它使用本机CLion自带的桌面MinGW运行真实的协议和控制核心，覆盖底盘与整车模式、频率、关控恢复、报文、限位、夹紧和多种故障。新增功率测试还覆盖原算法例题、10000组随机模型及整数命令回代、裁判反馈与缓冲保护，并验证升降和机械臂未参与功率缩放。它不能验证电机固件、接线、CAN物理层、机械行程、真实功率或PID稳定性。
 
 ## 重新用CubeMX生成
 

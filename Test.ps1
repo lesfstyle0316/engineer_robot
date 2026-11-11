@@ -3,7 +3,7 @@ $ErrorActionPreference='Stop'
 if(-not (Test-Path -LiteralPath $Gcc)) { throw "Native Windows GCC not found: $Gcc" }
 $testDirectory=Join-Path $PSScriptRoot 'build\HostTests'
 New-Item -ItemType Directory -Force -Path $testDirectory | Out-Null
-$sourceFiles=@('user_driver/src/robot_config.c','user_driver/src/drv_rc.c','user_driver/src/drv_motor.c','user_driver/src/drv_pid.c','user_driver/src/drv_power.c','task/src/robot_core.c','task/src/robot_selftest.c')
+$sourceFiles=@('user_driver/src/robot_config.c','user_driver/src/drv_rc.c','user_driver/src/drv_motor.c','user_driver/src/drv_pid.c','user_driver/src/drv_power.c','user_driver/src/motor_output.c','task/src/chassis_control.c','task/src/gimbal_control.c','task/src/robot_core.c','task/src/robot_selftest.c')
 $sourceFiles=@($sourceFiles | ForEach-Object { Join-Path $PSScriptRoot $_ })
 $testExecutable=Join-Path $testDirectory 'robot_selftest.exe'
 $compilerArguments=@('-std=c11','-O2','-Wall','-Wextra','-Werror',"-I$PSScriptRoot/user_driver/inc","-I$PSScriptRoot/task/inc")+$sourceFiles+@('-o',$testExecutable,'-lm')
@@ -12,7 +12,7 @@ if($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $testExecutable
 if($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $gpp=Join-Path (Split-Path -Parent $Gcc) 'g++.exe'
-$cObjectSources=@('user_driver/src/robot_config.c','user_driver/src/drv_motor.c','user_driver/src/drv_power.c','user_driver/src/drv_pid.c','user_driver/src/drv_rc.c','task/src/robot_core.c')
+$cObjectSources=@('user_driver/src/robot_config.c','user_driver/src/drv_motor.c','user_driver/src/drv_power.c','user_driver/src/drv_pid.c','user_driver/src/drv_rc.c','user_driver/src/motor_output.c','task/src/chassis_control.c','task/src/gimbal_control.c','task/src/robot_core.c')
 $cObjects=@()
 foreach($source in $cObjectSources) {
     $object=Join-Path $testDirectory (([IO.Path]::GetFileNameWithoutExtension($source))+'.obj')
