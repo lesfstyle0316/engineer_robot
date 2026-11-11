@@ -17,17 +17,18 @@ const DjiConfig g_dji_config[DJI_COUNT] = {
  * 下列映射范围是协议配置示例，不能据电机型号推断实际 EEPROM 值。
  * 必须使用达妙助手读取并核对。代码不自动写电机参数、不自动保存零点。
  * 后腿镜像安装默认右侧反向；MIT 增益为台架起调值，需空载确认。 */
+#define LIFT_MOTOR(id_, master_id_, direction_) \
+    {id_, master_id_, ROBOT_LIFT_PMAX_RAD, 45.0f, 18.0f, direction_, ROBOT_LIFT_EXTERNAL_REDUCTION, \
+     0.90f, DM_MODE_MIT, ROBOT_LIFT_MIT_KP, 0.5f}
 const DmConfig g_dm_config[DM_COUNT] = {
-    /* 左侧按减速前转子接法，机构转 10° 对应协议角度变化 1°；右侧接减速输出法兰。 */
-    [DM_LIFT_L] = {0x02, 0x03, 12.5f, 45.0f, 18.0f, 1.0f, 0.10f, 0.90f, DM_MODE_MIT, 10.0f, 0.5f},
-    [DM_LIFT_R] = {0x01, 0x11, ROBOT_RIGHT_LIFT_PMAX_RAD, 45.0f, 18.0f, -1.0f, 1.0f,
-                   500.0f * ROBOT_DEG2RAD, DM_MODE_MIT, 16.0f, 0.5f},
+    [DM_LIFT_L] = LIFT_MOTOR(0x02, 0x03, 1.0f),
+    [DM_LIFT_R] = LIFT_MOTOR(0x01, 0x11, -1.0f),
     [DM_BIG_PITCH] = {0x03, 0x303, 12.5f, 45.0f, 18.0f, 1.0f, 1.0f, 0.30f, DM_MODE_PV, 0.0f, 0.0f},
 };
 /* boot_joint_deg 是上电机械姿态对应的关节角，不是自动回零动作。
  * yaw 总是以上电位置为 0。pitch 需手动置于这里声明的姿态再上电。
- * 后腿在机械最低位上电，以该位置为 0°。全行程的 CAN 角度增量为左 +360°、右 -3600°。 */
-#define LIFT_MAX_TRAVEL_DEG 3600.0f
+ * 后腿在机械最低位上电，以该位置为 0°。CAN 配置行程为左 +3600°、右 -3600°，受两侧 PMAX 约束。 */
+#define LIFT_MAX_TRAVEL_DEG (ROBOT_LIFT_CAN_TRAVEL_DEG / ROBOT_LIFT_EXTERNAL_REDUCTION)
 const JointConfig g_joint_config[JOINT_COUNT] = {
     [JOINT_YAW] = {-180.0f, 180.0f, 0.0f, 30.0f, 4.0f, 40.0f},
     [JOINT_SMALL_PITCH] = {-60.0f, 45.0f, 0.0f, 15.0f, 4.0f, 25.0f},

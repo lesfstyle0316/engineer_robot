@@ -48,15 +48,19 @@ extern "C" {
 #ifndef ROBOT_WHEEL_POWER_LIMIT_ENABLED
 #define ROBOT_WHEEL_POWER_LIMIT_ENABLED 1
 #endif
-/* 同步阈值使用换算后的机构角度。 */
-#define ROBOT_LIFT_MAX_SKEW_DEG 5.0f
-#define ROBOT_LIFT_RESUME_SKEW_DEG 3.0f
-#define ROBOT_LIFT_MAX_LEAD_DEG 18.0f
-/* 联动使用同一个机构角速度，当前对应左 CAN 50°/s、右 CAN 500°/s。 */
-#define ROBOT_LIFT_SYNC_SPEED_DEG_S 500.0f
-/* 必须与右侧达妙驱动器读回的 PMAX 一致，单位 rad。 */
-#ifndef ROBOT_RIGHT_LIFT_PMAX_RAD
-#define ROBOT_RIGHT_LIFT_PMAX_RAD 12.5f
+/* 同步阈值使用换算后的机构角度，当前对应 CAN 行程差 4.5° / 3°。 */
+#define ROBOT_LIFT_MAX_SKEW_DEG 45.0f
+#define ROBOT_LIFT_RESUME_SKEW_DEG 30.0f
+#define ROBOT_LIFT_MAX_LEAD_DEG 180.0f /* 换算后的角度，当前对应 CAN 目标最多领先反馈 18°。 */
+/* 两侧沿用左后抬升的角度换算，CAN 行程和速度的幅值相同。 */
+#define ROBOT_LIFT_EXTERNAL_REDUCTION 0.10f
+#define ROBOT_LIFT_CAN_TRAVEL_DEG 3600.0f
+#define ROBOT_LIFT_CAN_SPEED_DEG_S 50.0f
+#define ROBOT_LIFT_MIT_KP 15.0f /* 左右后腿共用的 MIT 位置增益 */
+#define ROBOT_LIFT_SYNC_SPEED_DEG_S (ROBOT_LIFT_CAN_SPEED_DEG_S / ROBOT_LIFT_EXTERNAL_REDUCTION)
+/* 必须与两侧达妙驱动器读回的 PMAX 一致，单位 rad。 */
+#ifndef ROBOT_LIFT_PMAX_RAD
+#define ROBOT_LIFT_PMAX_RAD 12.5f
 #endif
 #define ROBOT_GRIP_CONTACT_CURRENT 1200.0f /* C610 反馈原始值，待实测 */
 #define ROBOT_GRIP_HOLD_CURRENT 700.0f

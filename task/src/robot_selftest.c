@@ -80,7 +80,7 @@ static void test_protocols(void) {
     const uint8_t feedback[8] = {0x12, 0x80, 0, 0x80, 0, 0, 30, 31};
     CHECK(Dm_Decode(&m, &g_dm_config[0], feedback, 8, 5));
     CHECK(m.state == 1 && m.rotor_temperature == 31);
-    NEAR(m.position, 0, 0.001f);
+    NEAR(m.position, lift.p_max / 65535.0f, 0.00001f);
     CHECK(!Dm_Decode(&m, &g_dm_config[1], feedback, 8, 5));
     Pid pid = {0};
     const PidConfig cfg = {5, 1, 10, 20};
@@ -317,15 +317,15 @@ static void test_paired_lift_catch_up(void) {
     run(20);
     NEAR(c.joint_target[JOINT_LIFT_L], 2.0f, 0.001f);
     in.dm[DM_LIFT_R].state = 1;
-    in.dm[DM_LIFT_R].position = -2.0f * ROBOT_DEG2RAD;
+    in.dm[DM_LIFT_R].position = -0.2f * ROBOT_DEG2RAD;
     step();
     CHECK(c.armed);
     NEAR(c.joint_target[JOINT_LIFT_R], 2.0f, 0.001f);
     NEAR(c.joint_target[JOINT_LIFT_L], 2.0f, 0.001f);
 
-    /* 两侧 CAN 增量相差十倍且方向相反，机构位移相同。 */
+    /* 两侧 CAN 角度增量等幅反向，机构位移相同。 */
     in.dm[DM_LIFT_L].position = 6.0f * ROBOT_DEG2RAD;
-    in.dm[DM_LIFT_R].position = -60.0f * ROBOT_DEG2RAD;
+    in.dm[DM_LIFT_R].position = -6.0f * ROBOT_DEG2RAD;
     step();
     CHECK(c.armed && c.lift_wait_mask == 0u);
     NEAR(c.lift_skew_deg, 0.0f, 0.001f);
@@ -334,18 +334,26 @@ static void test_paired_lift_catch_up(void) {
     in.rc.sw[ROBOT_RC_LEFT_SWITCH] = RC_UP;
     step();
     NEAR(c.dm_target[DM_LIFT_L] / ROBOT_CONTROL_DT, 50.0f * ROBOT_DEG2RAD, 0.001f);
-    NEAR(c.dm_target[DM_LIFT_R] / ROBOT_CONTROL_DT, -500.0f * ROBOT_DEG2RAD, 0.001f);
+    NEAR(c.dm_target[DM_LIFT_R] / ROBOT_CONTROL_DT, -50.0f * ROBOT_DEG2RAD, 0.001f);
     run(5);
     CHECK(c.joint_target[JOINT_LIFT_L] > 0.0f);
     NEAR(c.joint_target[JOINT_LIFT_L], c.joint_target[JOINT_LIFT_R], 0.001f);
 
-    in.dm[DM_LIFT_L].position = 0.525f * ROBOT_DEG2RAD;
+    /* Below the entry threshold, both targets should continue moving. */
+    float left_before = c.dm_target[DM_LIFT_L];
+    float right_before = c.dm_target[DM_LIFT_R];
+    in.dm[DM_LIFT_L].position = 3.0f * ROBOT_DEG2RAD;
+    step();
+    CHECK(c.lift_wait_mask == 0u);
+    CHECK(c.dm_target[DM_LIFT_L] > left_before && c.dm_target[DM_LIFT_R] < right_before);
+
+    in.dm[DM_LIFT_L].position = 4.75f * ROBOT_DEG2RAD;
     step();
     CHECK(c.armed && c.stop_reason == 0u && c.lift_wait_mask == (1u << DM_LIFT_L));
-    NEAR(c.lift_skew_deg, 5.25f, 0.001f);
+    NEAR(c.lift_skew_deg, 47.5f, 0.001f);
     float held = c.joint_target[JOINT_LIFT_L];
     float follower = c.joint_target[JOINT_LIFT_R];
-    NEAR(held, 5.25f, 0.001f);
+    NEAR(held, 47.5f, 0.001f);
     run(1000);
     NEAR(c.joint_target[JOINT_LIFT_L], held, 0.001f);
     CHECK(c.joint_target[JOINT_LIFT_R] > follower);
@@ -357,21 +365,30 @@ static void test_paired_lift_catch_up(void) {
     run(50);
     CHECK(c.armed && c.lift_wait_mask == 0u && c.joint_target[JOINT_LIFT_L] > held);
 
-    in.dm[DM_LIFT_L].position = 1.2f * ROBOT_DEG2RAD;
-    in.dm[DM_LIFT_R].position = -6.0f * ROBOT_DEG2RAD;
+    in.dm[DM_LIFT_L].position = 8.5f * ROBOT_DEG2RAD;
+    in.dm[DM_LIFT_R].position = -3.0f * ROBOT_DEG2RAD;
     in.rc.sw[ROBOT_RC_LEFT_SWITCH] = RC_DOWN;
     step();
     CHECK(c.armed && c.lift_wait_mask == (1u << DM_LIFT_R));
-    NEAR(c.joint_target[JOINT_LIFT_R], 6.0f, 0.001f);
+    NEAR(c.joint_target[JOINT_LIFT_R], 30.0f, 0.001f);
     follower = c.joint_target[JOINT_LIFT_L];
     run(500);
-    CHECK(c.joint_target[JOINT_LIFT_L] <= follower && c.joint_target[JOINT_LIFT_L] >= 5.999f);
+    CHECK(c.joint_target[JOINT_LIFT_L] <= follower && c.joint_target[JOINT_LIFT_L] >= 29.999f);
     in.rc.sw[ROBOT_RC_LEFT_SWITCH] = RC_MID;
     follower = c.joint_target[JOINT_LIFT_L];
     run(50);
     CHECK(c.lift_wait_mask == 0u);
     NEAR(c.joint_target[JOINT_LIFT_L], follower, 0.001f);
-    NEAR(c.joint_target[JOINT_LIFT_R], 6.0f, 0.001f);
+    NEAR(c.joint_target[JOINT_LIFT_R], 30.0f, 0.001f);
+
+    /* Stationary feedback caps both targets even with no synchronization wait. */
+    arm(ROBOT_PROFILE_CHASSIS);
+    in.rc.sw[ROBOT_RC_LEFT_SWITCH] = RC_UP;
+    run(400);
+    CHECK(c.armed && c.lift_direction == 1.0f && c.lift_wait_mask == 0u);
+    float max_lead_rad = ROBOT_LIFT_MAX_LEAD_DEG * ROBOT_LIFT_EXTERNAL_REDUCTION * ROBOT_DEG2RAD;
+    NEAR(c.dm_target[DM_LIFT_L] - in.dm[DM_LIFT_L].position, max_lead_rad, 0.00001f);
+    NEAR(c.dm_target[DM_LIFT_R] - in.dm[DM_LIFT_R].position, -max_lead_rad, 0.00001f);
 
     fixture(ROBOT_PROFILE_CHASSIS);
     in.dm[DM_LIFT_L].position = -1.25f;
@@ -385,12 +402,12 @@ static void test_paired_lift_catch_up(void) {
         step();
     }
     CHECK(c.armed && c.lift_wait_mask == 0u);
-    float right_span_rad = 1.75f + g_dm_config[DM_LIFT_R].p_max * (1.0f - 2.0f / 65535.0f);
-    float end_deg = fminf(3600.0f, right_span_rad * ROBOT_RAD2DEG);
-    NEAR(c.joint_target[JOINT_LIFT_L], end_deg, 0.01f);
-    NEAR(c.joint_target[JOINT_LIFT_R], end_deg, 0.01f);
-    NEAR(c.dm_target[DM_LIFT_L] - c.dm_boot_pos[DM_LIFT_L], end_deg * 0.1f * ROBOT_DEG2RAD, 0.001f);
-    NEAR(c.dm_target[DM_LIFT_R] - c.dm_boot_pos[DM_LIFT_R], -end_deg * ROBOT_DEG2RAD, 0.001f);
+    NEAR(c.joint_target[JOINT_LIFT_L], c.joint_target[JOINT_LIFT_R], 0.01f);
+    /* Both lifts use the same PMAX. The left boot position leaves the smaller travel margin. */
+    float left_travel_rad = g_dm_config[DM_LIFT_L].p_max * (1.0f - 2.0f / 65535.0f) + 1.25f;
+    float expected_travel_rad = fminf(ROBOT_LIFT_CAN_TRAVEL_DEG * ROBOT_DEG2RAD, left_travel_rad);
+    NEAR(c.dm_target[DM_LIFT_L] - c.dm_boot_pos[DM_LIFT_L], expected_travel_rad, 0.001f);
+    NEAR(c.dm_target[DM_LIFT_R] - c.dm_boot_pos[DM_LIFT_R], -expected_travel_rad, 0.001f);
     in.rc.sw[ROBOT_RC_LEFT_SWITCH] = RC_DOWN;
     for (unsigned i = 0; i < 75000; i++) {
         in.dm[DM_LIFT_L].position = c.dm_target[DM_LIFT_L];
@@ -402,7 +419,7 @@ static void test_paired_lift_catch_up(void) {
     NEAR(c.joint_target[JOINT_LIFT_R], 0.0f, 0.01f);
     NEAR(c.dm_target[DM_LIFT_L], -1.25f, 0.001f);
     NEAR(c.dm_target[DM_LIFT_R], 1.75f, 0.001f);
-    puts("PASS paired lift enable, catch-up, hysteresis, asymmetric gearing and travel");
+    puts("PASS paired lift enable, relaxed catch-up thresholds, stalled feedback cap and mirrored travel within PMAX");
 }
 static void test_safety(void) {
     arm(ROBOT_PROFILE_FULL);
@@ -453,11 +470,11 @@ static void test_safety(void) {
     CHECK(!c.armed && (c.stop_reason & ROBOT_STOP_BUS));
     arm(ROBOT_PROFILE_FULL);
     in.dm[DM_LIFT_L].position = 6.0f * ROBOT_DEG2RAD;
-    in.dm[DM_LIFT_R].position = -60.0f * ROBOT_DEG2RAD;
+    in.dm[DM_LIFT_R].position = -6.0f * ROBOT_DEG2RAD;
     step();
     CHECK(c.armed && c.stop_reason == 0u);
     NEAR(c.lift_skew_deg, 0.0f, 0.001f);
-    in.dm[DM_LIFT_L].position = 6.6f * ROBOT_DEG2RAD;
+    in.dm[DM_LIFT_L].position = 11.1f * ROBOT_DEG2RAD;
     in.rc.sw[ROBOT_RC_LEFT_SWITCH] = RC_UP;
     step();
     CHECK(c.armed && c.lift_wait_mask == (1u << DM_LIFT_L));
