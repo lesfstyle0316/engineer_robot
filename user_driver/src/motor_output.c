@@ -5,18 +5,21 @@ _Static_assert(ROBOT_DM_PERIOD_MS >= DM_COUNT, "DM slots must not overlap");
 
 unsigned MotorOutput_BuildFrames(MotorOutput *output, const DmFeedback dm[DM_COUNT],
                                  const int16_t dji_command[DJI_COUNT], const float dm_target[DM_COUNT],
-                                 bool enabled, bool gimbal_enabled, uint32_t tick,
+                                 bool enabled, uint32_t tick,
                                  MotorFrame frames[MOTOR_OUTPUT_MAX_FRAMES]) {
     unsigned count = 0;
     if (tick % ROBOT_DJI_PERIOD_MS == 0u) {
         const int16_t zero[4] = {0};
         Dji_GroupFrame(&frames[count++], 1, 0x200, enabled ? dji_command : zero);
-        bool arm_enabled = enabled && gimbal_enabled;
-        int16_t arm[4] = {arm_enabled ? dji_command[DJI_SMALL_PITCH] : 0,
-                          arm_enabled ? dji_command[DJI_GRIP] : 0, 0, 0};
+        int16_t arm[4] = {
+            [ROBOT_SMALL_PITCH_MOTOR_ID - 1u] = enabled ? dji_command[DJI_SMALL_PITCH] : 0,
+            [ROBOT_GRIP_MOTOR_ID - 1u] = enabled ? dji_command[DJI_GRIP] : 0,
+        };
         Dji_GroupFrame(&frames[count++], 2, 0x200, arm);
     } else if (tick % ROBOT_DJI_PERIOD_MS == 1u) {
-        int16_t yaw[4] = {enabled && gimbal_enabled ? dji_command[DJI_YAW] : 0, 0, 0};
+        int16_t yaw[4] = {
+            [ROBOT_YAW_MOTOR_ID - 1u] = enabled ? dji_command[DJI_YAW] : 0,
+        };
         Dji_GroupFrame(&frames[count++], 2, 0x1ff, yaw);
     }
 
@@ -26,7 +29,7 @@ unsigned MotorOutput_BuildFrames(MotorOutput *output, const DmFeedback dm[DM_COU
 
     MotorFrame *frame = &frames[count++];
     const DmConfig *motor = &g_dm_config[side];
-    if (!enabled || (side == DM_BIG_PITCH && !gimbal_enabled)) {
+    if (!enabled) {
         output->preloaded[side] = false;
         Dm_SpecialFrame(frame, motor, false);
     } else if (dm[side].state == 1u) {

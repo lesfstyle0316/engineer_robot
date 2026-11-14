@@ -1,3 +1,4 @@
+// 大疆电机模板作者 Tessia，CAN 设备接口和零点时序按本工程适配。
 #include "DJI_motor_driver.h"
 #include <cmath>
 namespace {
@@ -10,6 +11,11 @@ uint16_t control_id(uint8_t id, DJI_MOTOR_TYPE type) {
 int16_t signed_be(const uint8_t *p) {
     uint16_t u = (static_cast<uint16_t>(p[0]) << 8) | p[1];
     return static_cast<int16_t>(u >= 0x8000u ? static_cast<int32_t>(u) - 65536 : u);
+}
+void dji_motor_can_tx_write(uint8_t *data, unsigned slot, int16_t current_to_send) {
+    const auto value = static_cast<uint16_t>(current_to_send);
+    data[slot * 2 + 1] = static_cast<uint8_t>(value & 0xffu);
+    data[slot * 2] = static_cast<uint8_t>(value >> 8);
 }
 } // namespace
 DJI_motor_group::DJI_motor_group(can_network &net, uint8_t bus, uint16_t id) : can_tx(net, bus, id) {}
@@ -32,9 +38,7 @@ DJI_motor::~DJI_motor() {
 bool DJI_motor_group::write(unsigned slot, int16_t value) {
     if (slot > 3 || !owners[slot])
         return false;
-    uint16_t u = static_cast<uint16_t>(value);
-    can_tx.member.data[2 * slot] = static_cast<uint8_t>(u >> 8);
-    can_tx.member.data[2 * slot + 1] = static_cast<uint8_t>(u);
+    dji_motor_can_tx_write(can_tx.member.data, slot, value);
     return true;
 }
 bool DJI_motor_group::apply_frame(const MotorFrame &f, uint32_t now) {
@@ -92,11 +96,57 @@ void DJI_motor::motor_stop() {
     (void)motor_set_raw_output(0);
 }
 bool DJI_motor::motor_ready(uint32_t now) const {
-    return valid_ && motor_data.seen && (uint32_t)(now - motor_data.stamp_ms) < ROBOT_MOTOR_TIMEOUT_MS &&
+    return valid_ && motor_data.zero_ready && (uint32_t)(now - motor_data.stamp_ms) < ROBOT_MOTOR_TIMEOUT_MS &&
            (type_ == DJI_M3508 || !motor_data.position_lost);
 }
 void DJI_motor::dji_motor_data_update_callback(can_device_receive *rx, const MotorFrame &f, uint32_t now) {
     auto *self = static_cast<DJI_motor *>(rx->context());
     if (self && self->valid_)
         (void)Dji_Decode(&self->motor_data, f.data, f.dlc, now);
+}
+
+bool Dji_Decode(DjiFeedback *motor_data, const uint8_t *data, uint8_t dlc, uint32_t now) {
+    if (dlc != 8u)
+        return false;
+
+    const uint16_t ecd = (static_cast<uint16_t>(data[0]) << 8) | data[1];
+    if (ecd > 8191u)
+        return false;
+
+    ++motor_data->sequence;
+    if (motor_data->zero_ready) {
+        if (static_cast<uint32_t>(now - motor_data->stamp_ms) >= ROBOT_MOTOR_TIMEOUT_MS)
+            motor_data->position_lost = true;
+        const uint16_t last_ecd = motor_data->encoder;
+        int ecd_raw_rate = ecd - last_ecd;
+        if (ecd_raw_rate > 4096)
+            ecd_raw_rate -= 8192;
+        else if (ecd_raw_rate < -4096)
+            ecd_raw_rate += 8192;
+        motor_data->total_counts += ecd_raw_rate;
+    } else if (motor_data->sequence == ROBOT_DJI_ZERO_FRAMES) {
+        motor_data->zero_ready = true;
+    }
+
+    motor_data->encoder = ecd;
+    motor_data->rpm = signed_be(data + 2);
+    motor_data->current = signed_be(data + 4);
+    motor_data->temperature = data[6];
+    motor_data->stamp_ms = now;
+    motor_data->seen = true;
+    return true;
+}
+
+float Dji_JointDegrees(const DjiFeedback *motor_data, const DjiConfig *config) {
+    return static_cast<float>(motor_data->total_counts) * (360.0f / 8192.0f) * config->direction /
+           config->reduction;
+}
+
+void Dji_GroupFrame(MotorFrame *frame, uint8_t bus, uint16_t id, const int16_t values[4]) {
+    *frame = {};
+    frame->bus = bus;
+    frame->id = id;
+    frame->dlc = 8;
+    for (unsigned slot = 0; slot < 4; ++slot)
+        dji_motor_can_tx_write(frame->data, slot, values[slot]);
 }

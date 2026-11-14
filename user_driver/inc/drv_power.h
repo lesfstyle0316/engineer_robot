@@ -31,6 +31,7 @@ typedef struct {
 extern const PowerConfig g_power_config;
 typedef struct {
     bool seen, valid;
+    uint8_t last_dlc; /* 最近一次收到的裁判帧长度，含坏帧 */
     float chassis_power_w, buffer_j;
     uint32_t stamp_ms, sequence, bad_frames;
     uint8_t raw[4];
@@ -58,7 +59,7 @@ void PowerLimiter_ResetOutput(PowerLimiter *s);
 void PowerLimiter_Apply(PowerLimiter *s, const PowerConfig *cfg, const PowerTelemetry *telemetry,
                         const int16_t requested[4], const int16_t measured[4], const int16_t rpm[4],
                         uint32_t now, float dt, int16_t output[4]);
-/* 规则缓冲公式的纯函数，仅用于验算/日志；不冒充裁判真实缓冲。 */
+/* 按功率差积分缓冲能量，仅用于验算和日志。 */
 float Power_BufferStep(float joules, float measured_w, float limit_w, float dt);
 #ifdef __cplusplus
 }

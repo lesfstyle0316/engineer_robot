@@ -175,16 +175,20 @@ static void test_dji_objects() {
     auto feedback = frame(1, 0x201);
     const uint8_t bytes[8] = {0x1f, 0xfa, 0, 100, 0, 10, 30, 0};
     std::memcpy(feedback.data, bytes, 8);
-    CHECK(net.dispatch(feedback, 5));
-    CHECK(lf.motor_ready(5));
+    for (uint32_t tick = 1; tick < ROBOT_DJI_ZERO_FRAMES; ++tick)
+        CHECK(net.dispatch(feedback, tick));
+    CHECK(!lf.motor_ready(ROBOT_DJI_ZERO_FRAMES - 1u));
+    CHECK(net.dispatch(feedback, ROBOT_DJI_ZERO_FRAMES));
+    CHECK(lf.motor_ready(ROBOT_DJI_ZERO_FRAMES));
     NEAR(lf.motor_get_speed(), 100, 0.001f);
     feedback.data[0] = 0;
     feedback.data[1] = 4;
-    CHECK(net.dispatch(feedback, 6));
+    CHECK(net.dispatch(feedback, ROBOT_DJI_ZERO_FRAMES + 1u));
     CHECK(lf.feedback().total_counts == 10);
-    CHECK(!lf.motor_ready(56));
+    CHECK(lf.motor_ready(ROBOT_DJI_ZERO_FRAMES + 1u + ROBOT_MOTOR_TIMEOUT_MS - 1u));
+    CHECK(!lf.motor_ready(ROBOT_DJI_ZERO_FRAMES + 1u + ROBOT_MOTOR_TIMEOUT_MS));
     DJI_motor_group yaw_group(net, 2, 0x1ff);
-    DJI_motor yaw(net, yaw_group, g_dji_config[DJI_YAW], 1, DJI_GM6020);
+    DJI_motor yaw(net, yaw_group, g_dji_config[DJI_YAW], ROBOT_YAW_MOTOR_ID, DJI_GM6020);
     CHECK(yaw.valid() && !yaw.motor_set_current(0.1f));
     CHECK(yaw.motor_set_voltage(0.1f) && yaw.command() == 3000);
     DjiConfig cfg = g_dji_config[DJI_YAW];
@@ -209,7 +213,8 @@ static void test_dji_objects() {
 static void test_dm_objects() {
     can_network net;
     const DmConfig &lift_cfg = g_dm_config[DM_LIFT_L];
-    const DmConfig &pitch_cfg = g_dm_config[DM_BIG_PITCH];
+    DmConfig pitch_cfg = g_dm_config[DM_BIG_PITCH];
+    pitch_cfg.mode = DM_MODE_PV;
     DM_motor motor(net, lift_cfg), pitch(net, pitch_cfg);
     CHECK(motor.valid() && pitch.valid() && !motor.motor_ready(0));
     MotorFrame command;
@@ -227,7 +232,7 @@ static void test_dm_objects() {
     CHECK(!motor.apply_frame(command, 2));
     Dm_PositionFrame(&command, &pitch_cfg, 1.0f, 0.2f);
     CHECK(!motor.apply_frame(command, 2) && pitch.apply_frame(command, 2));
-    CHECK(net.pop(2, 2, msg) && msg.frame.id == 0x103);
+    CHECK(net.pop(2, 2, msg) && msg.frame.id == 0x100u + pitch_cfg.motor_id);
     CHECK(!std::memcmp(command.data, msg.frame.data, 8));
     CHECK(pitch.motor_set_position(0.5f, 0.2f) && pitch.can_send_msg(2));
     CHECK(net.pop(2, 2, msg));
@@ -269,10 +274,10 @@ static void inject_feedback(uint32_t now) {
         CHECK(net.dispatch(f, now));
     }
     auto p = frame(2, 0x31, 4);
-    p.data[0] = 0;
-    p.data[1] = 50;
-    p.data[2] = 2;
-    p.data[3] = 0x58;
+    p.data[0] = 50; /* 5.0 W, signed int16 little-endian */
+    p.data[1] = 0;
+    p.data[2] = 0x70; /* 600.0 J, signed int16 little-endian */
+    p.data[3] = 0x17;
     CHECK(net.dispatch(p, now));
 }
 static void test_system_replay() {
@@ -281,17 +286,23 @@ static void test_system_replay() {
     CHECK(net.rx_count(1) == 4 && net.rx_count(2) == 7);
     CHECK(g_dji_config[DJI_LR].feedback_id == 0x203 && g_dji_config[DJI_RR].feedback_id == 0x204);
     CHECK(g_dm_config[DM_LIFT_R].motor_id == 0x01 && g_dm_config[DM_LIFT_R].master_id == 0x11);
+    const DmConfig &big_pitch = g_dm_config[DM_BIG_PITCH];
+    CHECK(big_pitch.mode == DM_MODE_MIT && Dm_CommandId(&big_pitch) == 0x04 && big_pitch.master_id == 0x303);
     RobotCore core;
     RobotCore_Init(&core);
     RobotInput input{};
-    input.profile = ROBOT_PROFILE_FULL;
     input.rc.valid = true;
     input.rc.sw[0] = RC_MID;
     input.rc.sw[1] = RC_MID;
     unsigned frames[6]{};
     for (uint32_t now = 0; now < 1000; now++) {
+        bool rear_turn_test = ROBOT_FRONT_WHEEL_CURRENT_TEST && ROBOT_WHEEL_POWER_LIMIT_ENABLED &&
+                             now >= 720u && now < 760u;
         inject_feedback(now);
         MotorSystem_CopyFeedback(input.dji, input.dm, &input.power);
+        CHECK(input.power.valid && input.power.last_dlc == 4 && input.power.sequence == now + 1u);
+        NEAR(input.power.chassis_power_w, 5.0f, 0.001f);
+        NEAR(input.power.buffer_j, 600.0f, 0.001f);
         input.rc.stamp_ms = now;
         if (now == 600) {
             input.rc.channel[3] = 660;
@@ -302,10 +313,23 @@ static void test_system_replay() {
         }
         if (now == 700)
             input.rc.sw[1] = RC_DOWN;
+        if (rear_turn_test) {
+            input.rc.sw[0] = RC_MID;
+            input.rc.channel[3] = 0;
+            input.rc.channel[2] = 660;
+        } else if (now == 760) {
+            input.rc.sw[0] = RC_UP;
+            input.rc.channel[3] = 660;
+            input.rc.channel[2] = 0;
+        }
         if (now == 800)
             input.rc.valid = false;
         RobotOutput out;
         RobotCore_Step(&core, &input, now, &out);
+        if (out.armed && ROBOT_WHEEL_POWER_LIMIT_ENABLED) {
+            CHECK(!(core.power.status & POWER_STATUS_REFEREE_INVALID));
+            NEAR(core.power.buffer_j, 600.0f, 0.001f);
+        }
         if (out.abort_pending) {
             net.cancel(1);
             net.cancel(2);
@@ -329,7 +353,10 @@ static void test_system_replay() {
                 ++sent;
                 if (bus == 1) {
                     if (ROBOT_FRONT_WHEEL_CURRENT_TEST) {
-                        CHECK(!(msg.frame.data[4] || msg.frame.data[5] || msg.frame.data[6] || msg.frame.data[7]));
+                        uint16_t expected = rear_turn_test ? static_cast<uint16_t>(ROBOT_REAR_ASSIST_TURN_MAX_COMMAND)
+                                                          : 0u;
+                        CHECK(((msg.frame.data[4] << 8) | msg.frame.data[5]) == expected);
+                        CHECK(((msg.frame.data[6] << 8) | msg.frame.data[7]) == expected);
                         if (!ROBOT_WHEEL_POWER_LIMIT_ENABLED && now >= 600 && now < 800) {
                             CHECK(msg.frame.data[0] == 0x40 && msg.frame.data[1] == 0);
                             CHECK(msg.frame.data[2] == 0xc0 && msg.frame.data[3] == 0);
@@ -360,7 +387,15 @@ static void test_system_replay() {
     DmFeedback m[DM_COUNT];
     PowerTelemetry p;
     MotorSystem_CopyFeedback(d, m, &p);
-    CHECK(!p.valid && p.bad_frames == 1);
+    CHECK(!p.valid && p.bad_frames == 1 && p.last_dlc == 8 && p.sequence == 1000u);
+    auto negative_buffer = frame(2, 0x31, 4);
+    negative_buffer.data[2] = 0x38;
+    negative_buffer.data[3] = 0xff; /* -20.0 J remains valid telemetry. */
+    CHECK(net.dispatch(negative_buffer, 1001));
+    MotorSystem_CopyFeedback(d, m, &p);
+    CHECK(p.valid && p.bad_frames == 1 && p.last_dlc == 4 && p.sequence == 1001u);
+    NEAR(p.buffer_j, -20.0f, 0.001f);
+    CHECK(!std::memcmp(p.raw, negative_buffer.data, sizeof(p.raw)));
     CHECK(!MotorSystem_SendFrame(&bad, 1000));
     std::puts("PASS 1000-cycle real controller -> motor objects -> CAN queues replay: every payload "
               "preserved, 500/200Hz scheduling and radio stop");

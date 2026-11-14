@@ -17,9 +17,9 @@ class robot_motor_devices {
           wheel_rf(net, chassis_group, g_dji_config[DJI_RF], 2, DJI_M3508),
           wheel_lr(net, chassis_group, g_dji_config[DJI_LR], 3, DJI_M3508),
           wheel_rr(net, chassis_group, g_dji_config[DJI_RR], 4, DJI_M3508),
-          yaw(net, yaw_voltage_group, g_dji_config[DJI_YAW], 1, DJI_GM6020),
-          small_pitch(net, arm_current_group, g_dji_config[DJI_SMALL_PITCH], 1, DJI_M2006),
-          gripper(net, arm_current_group, g_dji_config[DJI_GRIP], 2, DJI_M2006),
+          yaw(net, yaw_voltage_group, g_dji_config[DJI_YAW], ROBOT_YAW_MOTOR_ID, DJI_GM6020),
+          small_pitch(net, arm_current_group, g_dji_config[DJI_SMALL_PITCH], ROBOT_SMALL_PITCH_MOTOR_ID, DJI_M2006),
+          gripper(net, arm_current_group, g_dji_config[DJI_GRIP], ROBOT_GRIP_MOTOR_ID, DJI_M2006),
           lift_left(net, g_dm_config[DM_LIFT_L]), lift_right(net, g_dm_config[DM_LIFT_R]),
           big_pitch(net, g_dm_config[DM_BIG_PITCH]),
           power_rx(net, ROBOT_POWER_CAN_BUS, ROBOT_POWER_CAN_ID, power_update, this, 4, power_update) {}

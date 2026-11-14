@@ -13,6 +13,7 @@ static int16_t unpack16(const uint8_t *b, uint8_t order) {
     return signed16(u);
 }
 bool PowerTelemetry_Decode(PowerTelemetry *s, const uint8_t *b, uint8_t n, uint8_t order, uint32_t now) {
+    s->last_dlc = n;
     if (n == 4u)
         memcpy(s->raw, b, 4);
     if (n != 4u || (order != POWER_ORDER_LITTLE_ENDIAN && order != POWER_ORDER_BIG_ENDIAN)) {
@@ -21,12 +22,6 @@ bool PowerTelemetry_Decode(PowerTelemetry *s, const uint8_t *b, uint8_t n, uint8
         return false;
     }
     int16_t p = unpack16(b, order), z = unpack16(b + 2, order);
-    /* 规则允许负功率（字段为int16），缓冲严格为-10..60J。 */
-    if (z < -100 || z > 600) {
-        s->valid = false;
-        ++s->bad_frames;
-        return false;
-    }
     s->chassis_power_w = (float)p * 0.1f;
     s->buffer_j = (float)z * 0.1f;
     s->stamp_ms = now;
@@ -42,7 +37,7 @@ bool PowerConfig_IsValid(const PowerConfig *c) {
            isfinite(c->safety_margin_w) && c->safety_margin_w >= 0 && c->safety_margin_w < c->rule_limit_w &&
            isfinite(c->bench_limit_w) && c->bench_limit_w >= 0 &&
            c->bench_limit_w <= c->rule_limit_w - c->safety_margin_w && isfinite(c->buffer_target_j) &&
-           c->buffer_target_j > 0 && c->buffer_target_j <= 60.0f && isfinite(c->recharge_time_s) &&
+           c->buffer_target_j > 0 && isfinite(c->recharge_time_s) &&
            c->recharge_time_s > 0 && isfinite(c->reserve_up_tau_s) && c->reserve_up_tau_s > 0 &&
            isfinite(c->reserve_down_tau_s) && c->reserve_down_tau_s > 0 && isfinite(c->k_recovery_per_s) &&
            c->k_recovery_per_s > 0 && c->referee_timeout_ms > 0u && c->referee_timeout_ms < 0x80000000u &&
@@ -117,7 +112,7 @@ static void quantize(const int16_t in[4], float k, int16_t out[4]) {
 float Power_BufferStep(float z, float p, float limit, float dt) {
     if (!isfinite(z) || !isfinite(p) || !isfinite(limit) || !isfinite(dt) || dt < 0)
         return NAN;
-    return clamp(z + (limit - p) * dt, -10.0f, 60.0f);
+    return z + (limit - p) * dt;
 }
 void PowerLimiter_Apply(PowerLimiter *s, const PowerConfig *cfg, const PowerTelemetry *t,
                         const int16_t request[4], const int16_t measured[4], const int16_t rpm[4],
@@ -139,8 +134,7 @@ void PowerLimiter_Apply(PowerLimiter *s, const PowerConfig *cfg, const PowerTele
         s->measured_power_w = t->chassis_power_w;
         s->buffer_j = t->buffer_j;
         /* 此函数也可由非CAN源调用，因此对浮点输入再校验一次。 */
-        if (!isfinite(t->chassis_power_w) || !isfinite(t->buffer_j) || t->buffer_j < -10 ||
-            t->buffer_j > 60) {
+        if (!isfinite(t->chassis_power_w) || !isfinite(t->buffer_j)) {
             s->status = POWER_STATUS_REFEREE_INVALID;
             s->k_applied = 0;
             return;
@@ -165,6 +159,8 @@ void PowerLimiter_Apply(PowerLimiter *s, const PowerConfig *cfg, const PowerTele
             s->budget_w -= (cfg->buffer_target_j - t->buffer_j) / cfg->recharge_time_s;
             s->status |= POWER_STATUS_LOW_BUFFER;
         }
+        /* 实测误差只用于有效裁判反馈，台架预算独立计算。 */
+        s->budget_w = fmaxf(0.0f, s->budget_w - s->residual_reserve_w);
     } else {
         if (cfg->require_referee) {
             s->status = (!t->valid && (t->seen || t->bad_frames)) ? POWER_STATUS_REFEREE_INVALID
@@ -189,7 +185,6 @@ void PowerLimiter_Apply(PowerLimiter *s, const PowerConfig *cfg, const PowerTele
             return;
         }
     }
-    s->budget_w = fmaxf(0.0f, s->budget_w - s->residual_reserve_w);
     float amp[4], speed[4];
     for (unsigned i = 0; i < 4; i++) {
         amp[i] = request[i] * POWER_C620_A_PER_COUNT;

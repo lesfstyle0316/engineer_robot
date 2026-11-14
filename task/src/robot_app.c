@@ -5,7 +5,6 @@
 #include "cmsis_os2.h"
 #include "iwdg.h"
 #include <string.h>
-volatile uint32_t g_robot_requested_profile = ROBOT_DEFAULT_PROFILE;
 volatile uint32_t g_robot_emergency_stop;
 volatile RobotDebug g_robot_debug;
 static RobotCore s_core;
@@ -35,9 +34,6 @@ static void ControlTask(void *arg) {
         memcpy(in.dm, snapshot.dm, sizeof(in.dm));
         in.bus_fault_mask = snapshot.bus_fault_mask;
         in.bus_fault_mask |= tx_fault_mask;
-        uint32_t requested = g_robot_requested_profile;
-        in.profile = requested == ROBOT_PROFILE_CHASSIS || requested == ROBOT_PROFILE_FULL
-                         ? (uint8_t)requested : 0u;
         in.emergency_stop = g_robot_emergency_stop != 0 || BSP_UserEmergencyStop();
         in.hardware_limit_mask = BSP_UserLimitMask();
         RobotCore_Step(&s_core, &in, now, &out);

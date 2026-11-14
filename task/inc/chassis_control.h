@@ -3,5 +3,7 @@
 #include "robot_core.h"
 
 void Chassis_WheelStep(const RcState *rc, const DjiFeedback dji[4], Pid speed_pid[4], int16_t command[4]);
+void Chassis_ApplyRearBufferAssist(const RobotInput *input, const PowerLimiter *power,
+                                   const int16_t front_request[4], int16_t command[4]);
 void Chassis_LiftStep(RobotCore *controller, const RobotInput *input);
 #endif

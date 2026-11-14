@@ -15,7 +15,8 @@ typedef struct {
     uint16_t encoder;
     int16_t rpm, current;
     uint8_t temperature;
-    int64_t total_counts; /* 上电第一帧为0，之后连续累计，不重置yaw零点 */
+    bool zero_ready;
+    int64_t total_counts; /* 第 51 帧为零，之后连续累计跨圈增量 */
     uint32_t stamp_ms, sequence;
 } DjiFeedback;
 typedef struct {

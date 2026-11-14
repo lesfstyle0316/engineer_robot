@@ -1,6 +1,6 @@
 #include "chassis_control.h"
 #include <math.h>
-
+bool assist=0;
 void Chassis_WheelStep(const RcState *rc, const DjiFeedback dji[4], Pid speed_pid[4], int16_t command[4]) {
     float forward = Rc_Axis(rc, 3) * ROBOT_RC_FORWARD_SIGN;
     float turn = Rc_Axis(rc, 2) * ROBOT_RC_TURN_SIGN;
@@ -26,6 +26,41 @@ void Chassis_WheelStep(const RcState *rc, const DjiFeedback dji[4], Pid speed_pi
         float output = Pid_Update(&speed_pid[i], &motor->speed_pid, error, ROBOT_CONTROL_DT);
         command[i] = (int16_t)(motor->direction * Control_Clamp(output, -motor->max_command, motor->max_command));
     }
+}
+
+void Chassis_ApplyRearBufferAssist(const RobotInput *input, const PowerLimiter *power,
+                                   const int16_t front_request[4], int16_t command[4]) {
+    bool turning = Rc_Axis(&input->rc, 2) * ROBOT_RC_TURN_SIGN != 0.0f;
+    assist = turning;
+    if (!ROBOT_FRONT_WHEEL_CURRENT_TEST || power->k_applied <= 0.0f ||
+        (power->status & POWER_STATUS_BENCH_MODEL_ONLY) || !turning)
+        return;
+
+    float reserve_j = fmaxf(ROBOT_REAR_ASSIST_BUFFER_RESERVE_J, g_power_config.buffer_target_j);
+    float budget_w = fminf(ROBOT_REAR_ASSIST_MAX_POWER_W,
+                           (power->buffer_j - reserve_j) / g_power_config.recharge_time_s);
+    if (budget_w <= 0.0f)
+        return;
+
+    float amps[4] = {0}, rpm[4] = {0};
+    for (unsigned i = DJI_LR; i <= DJI_RR; i++) {
+        unsigned front = i == DJI_LR ? DJI_LF : DJI_RF;
+        const DjiConfig *front_motor = &g_dji_config[front];
+        float demand = front_request[front] * front_motor->direction / front_motor->max_command;
+        float current_limit = fminf(ROBOT_REAR_ASSIST_TURN_MAX_COMMAND, g_dji_config[i].max_command);
+        amps[i] = demand * current_limit * POWER_C620_A_PER_COUNT;
+        /* 按电流和转速的幅值估算助力功率，不把制动回馈算作可用预算。 */
+        rpm[i] = copysignf((float)input->dji[i].rpm, amps[i]);
+    }
+
+    PowerConfig assist_config = g_power_config;
+    assist_config.baseline_w = 0.0f; /* 四轮的公共静态损耗已由前轮主限功率计算。 */
+    PowerSolution solution = Power_Solve(&assist_config, amps, rpm, budget_w);
+    if (!solution.valid || !solution.feasible)
+        return;
+
+    for (unsigned i = DJI_LR; i <= DJI_RR; i++)
+        command[i] = (int16_t)(solution.k * amps[i] / POWER_C620_A_PER_COUNT * g_dji_config[i].direction);
 }
 
 static void lift_travel_bounds(const RobotCore *c, unsigned side, const JointConfig *joint,

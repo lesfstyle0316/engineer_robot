@@ -5,8 +5,8 @@
  * 角度/外部减速比映射和PI继续由robot_core管理，以保留功率约束与抗饱和。 */
 class motor_dev {
   public:
-    float motor_get_speed() const { return direction_ * motor_get_speed_forward(); }
-    float motor_get_rounds() const { return direction_ * motor_get_rounds_forward(); }
+    float motor_get_speed() const;
+    float motor_get_rounds() const;
     virtual bool motor_ready(uint32_t now) const = 0;
     virtual void motor_stop() = 0;
 

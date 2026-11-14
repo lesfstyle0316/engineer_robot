@@ -4,22 +4,18 @@
 #include <math.h>
 #include <string.h>
 
-_Static_assert(ROBOT_DEFAULT_PROFILE == ROBOT_PROFILE_CHASSIS || ROBOT_DEFAULT_PROFILE == ROBOT_PROFILE_FULL,
-               "Select chassis or full robot mode");
-
 void RobotCore_Init(RobotCore *c) {
     memset(c, 0, sizeof(*c));
     PowerLimiter_Init(&c->power);
 }
 
 static void measurements(RobotCore *c, const RobotInput *in) {
-    for (unsigned i = 0; i < 3; i++) {
+    for (unsigned i = JOINT_YAW; i <= JOINT_GRIP; i++) {
         unsigned mi = DJI_YAW + i;
-        c->joint_measured[i] =
-            Dji_JointDegrees(&in->dji[mi], &g_dji_config[mi]) + g_joint_config[i].boot_joint_deg;
+        c->joint_measured[i] = Dji_JointDegrees(&in->dji[mi], &g_dji_config[mi]);
     }
     for (unsigned i = 0; i < DM_COUNT; i++) {
-        if (in->dm[i].seen && !c->dm_origin_valid[i]) {
+        if (in->dm[i].seen && !c->dm_origin_valid[i] && isfinite(in->dm[i].position)) {
             c->dm_boot_pos[i] = in->dm[i].position;
             c->dm_origin_valid[i] = true;
         }
@@ -31,9 +27,7 @@ static void measurements(RobotCore *c, const RobotInput *in) {
     c->lift_skew_deg = c->joint_measured[JOINT_LIFT_L] - c->joint_measured[JOINT_LIFT_R];
 }
 
-static uint32_t stop_reason(const RobotCore *c, const RobotInput *in, uint32_t now, bool full) {
-    if (in->profile != ROBOT_PROFILE_CHASSIS && !full)
-        return ROBOT_STOP_MODE;
+static uint32_t stop_reason(const RobotCore *c, const RobotInput *in, uint32_t now) {
     if (!in->rc.valid || (uint32_t)(now - in->rc.stamp_ms) >= ROBOT_RC_TIMEOUT_MS ||
         in->rc.bad_frames != c->last_bad_frames)
         return ROBOT_STOP_RC;
@@ -43,14 +37,16 @@ static uint32_t stop_reason(const RobotCore *c, const RobotInput *in, uint32_t n
         return ROBOT_STOP_LIMIT;
     if (in->bus_fault_mask)
         return ROBOT_STOP_BUS;
-    for (unsigned i = 0; i < (full ? DJI_COUNT : 4u); i++) {
+    for (unsigned i = 0; i < DJI_COUNT; i++) {
+        if (i == DJI_GRIP && !ROBOT_GRIP_INSTALLED)
+            continue;
         const DjiFeedback *d = &in->dji[i];
-        if (!d->seen || (uint32_t)(now - d->stamp_ms) >= ROBOT_MOTOR_TIMEOUT_MS)
+        if (!d->seen || !d->zero_ready || (uint32_t)(now - d->stamp_ms) >= ROBOT_MOTOR_TIMEOUT_MS)
             return ROBOT_STOP_FEEDBACK;
         if (i >= DJI_YAW && d->position_lost)
             return ROBOT_STOP_POSITION_LOST;
     }
-    for (unsigned i = 0; i < (full ? DM_COUNT : DM_BIG_PITCH); i++) {
+    for (unsigned i = 0; i < DM_COUNT; i++) {
         const DmFeedback *d = &in->dm[i];
         if (!d->seen || (uint32_t)(now - d->stamp_ms) >= ROBOT_MOTOR_TIMEOUT_MS || !isfinite(d->position))
             return ROBOT_STOP_FEEDBACK;
@@ -98,10 +94,11 @@ static void update_wheels(RobotCore *c, const RobotInput *in, uint32_t now) {
         if ((request[i] - c->dji_command[i]) * g_dji_config[i].direction *
                 (c->speed_pid[i].integral - integral[i]) > 0.0f)
             c->speed_pid[i].integral = integral[i];
+    Chassis_ApplyRearBufferAssist(in, &c->power, request, c->dji_command);
 }
 
-static void update_dm_targets(RobotCore *c, const RobotInput *in, bool full) {
-    for (unsigned i = 0; i < (full ? DM_COUNT : DM_BIG_PITCH); i++) {
+static void update_dm_targets(RobotCore *c, const RobotInput *in) {
+    for (unsigned i = 0; i < DM_COUNT; i++) {
         const DmConfig *motor = &g_dm_config[i];
         unsigned joint = JOINT_LIFT_L + i;
         float delta = c->joint_target[joint] - g_joint_config[joint].boot_joint_deg;
@@ -116,16 +113,9 @@ void RobotCore_Step(RobotCore *c, const RobotInput *in, uint32_t now, RobotOutpu
     memset(out, 0, sizeof(*out));
     bool was_armed = c->armed;
     float previous_power = c->power.k_applied;
-    bool full = in->profile == ROBOT_PROFILE_FULL;
     measurements(c, in);
 
-    if (c->profile != in->profile) {
-        c->profile = in->profile;
-        c->armed = false;
-        c->neutral_tracking = false;
-        reset_control(c);
-    }
-    uint32_t reason = stop_reason(c, in, now, full);
+    uint32_t reason = stop_reason(c, in, now);
     c->last_bad_frames = in->rc.bad_frames;
     if (reason) {
         c->armed = false;
@@ -147,9 +137,8 @@ void RobotCore_Step(RobotCore *c, const RobotInput *in, uint32_t now, RobotOutpu
     if (c->armed) {
         update_wheels(c, in, now);
         Chassis_LiftStep(c, in);
-        if (full)
-            Gimbal_Step(c, in, now);
-        update_dm_targets(c, in, full);
+        Gimbal_Step(c, in, now);
+        update_dm_targets(c, in);
     }
     c->stop_reason = reason ? reason : (c->armed ? 0u : ROBOT_STOP_NEUTRAL_REQUIRED);
     out->abort_pending = was_armed && !c->armed;
@@ -158,5 +147,5 @@ void RobotCore_Step(RobotCore *c, const RobotInput *in, uint32_t now, RobotOutpu
     out->armed = c->armed;
     out->reason = c->stop_reason;
     out->count = MotorOutput_BuildFrames(&c->motor_output, in->dm, c->dji_command, c->dm_target,
-                                         c->armed, full, c->step_count++, out->frames);
+                                         c->armed, c->step_count++, out->frames);
 }

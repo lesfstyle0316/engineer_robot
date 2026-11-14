@@ -12,7 +12,6 @@ enum {
     ROBOT_STOP_DM_ERROR = 8u,
     ROBOT_STOP_BUS = 16u,
     ROBOT_STOP_ESTOP = 32u,
-    ROBOT_STOP_MODE = 64u,
     ROBOT_STOP_POSITION_LOST = 128u,
     ROBOT_STOP_LIMIT = 256u,
     ROBOT_STOP_NEUTRAL_REQUIRED = 1024u,
@@ -22,14 +21,14 @@ typedef struct {
     DjiFeedback dji[DJI_COUNT];
     DmFeedback dm[DM_COUNT];
     PowerTelemetry power;
-    uint8_t profile, bus_fault_mask;
+    uint8_t bus_fault_mask;
     uint32_t hardware_limit_mask; /* 任一非0位触发全局停机，不自动回零 */
     bool emergency_stop;
 } RobotInput;
 typedef struct {
     bool armed, neutral_tracking, grip_hold;
     bool dm_origin_valid[DM_COUNT];
-    uint8_t profile, lift_wait_mask;
+    uint8_t lift_wait_mask;
     uint32_t stop_reason, neutral_since_ms;
     uint32_t last_bad_frames, step_count, grip_contact_since_ms;
     bool grip_contact_tracking;

@@ -6,19 +6,18 @@ extern "C" {
 #include <stdint.h>
 #include "drv_power.h"
 /* 唯一的集中配置入口。先看 README.md。单位写在字段名或注释中。 */
-#define ROBOT_PROFILE_CHASSIS 1u /* 四轮 + 同步后腿 */
-#define ROBOT_PROFILE_FULL 3u
-/* 当前上电默认：底盘调试。 */
-#ifndef ROBOT_DEFAULT_PROFILE
-#define ROBOT_DEFAULT_PROFILE ROBOT_PROFILE_CHASSIS
+/* 夹爪拆下调试时为 0，装回后设为 1。 */
+#ifndef ROBOT_GRIP_INSTALLED
+#define ROBOT_GRIP_INSTALLED 0
 #endif
 /* CAN对象层容量与最长待发/邮箱驻留时间；两路分别分配固定存储。 */
 #define ROBOT_CAN_MAX_RX_PER_BUS 16u
 #define ROBOT_CAN_TX_QUEUE_CAPACITY 16u
 #define ROBOT_CAN_MAX_TX_AGE_MS 5u
 #define ROBOT_RC_TIMEOUT_MS 60u
-#define ROBOT_MOTOR_TIMEOUT_MS 50u
+#define ROBOT_MOTOR_TIMEOUT_MS 200u
 #define ROBOT_NEUTRAL_DWELL_MS 500u
+#define ROBOT_DJI_ZERO_FRAMES 51u /* 第 51 帧有效反馈建立零点 */
 #define ROBOT_DJI_PERIOD_MS 2u /* 500Hz 控制，反馈 1000Hz */
 #define ROBOT_DM_PERIOD_MS 5u  /* 200Hz 控制 + 200Hz 回复 */
 #define ROBOT_CONTROL_DT 0.001f
@@ -33,16 +32,22 @@ extern "C" {
 #define ROBOT_M3508_P19_REDUCTION (3591.0f / 187.0f)
 #define ROBOT_WHEEL_MAX_OUTPUT_RPM (8000.0f / ROBOT_M3508_P19_REDUCTION) /* 四轮速度环的轮端目标 rpm */
 #define ROBOT_C620_MAX_COMMAND 16384.0f
-/* 前轮电流调试，后轮轮电机持续零电流。关闭后恢复四轮速度环。 */
+#define ROBOT_YAW_MOTOR_ID 2u
+#define ROBOT_SMALL_PITCH_MOTOR_ID 3u
+#define ROBOT_GRIP_MOTOR_ID 1u
+/* 前轮电流直控，后轮仅在满足缓冲助力条件时输出。关闭后恢复四轮速度环。 */
 #ifndef ROBOT_FRONT_WHEEL_CURRENT_TEST
 #define ROBOT_FRONT_WHEEL_CURRENT_TEST 1
 #endif
-/* RoboSister电源管理模块：CAN2 / 标准帧0x31 / DLC4 / 大端int16。
+#define ROBOT_REAR_ASSIST_MAX_POWER_W 32.0f      /* 两台后轮合计的额外模型功率 */
+#define ROBOT_REAR_ASSIST_BUFFER_RESERVE_J 25.0f
+#define ROBOT_REAR_ASSIST_TURN_MAX_COMMAND 9000.0f /* 转向时每台后轮的电流指令幅值上限 */
+/* RoboSister电源管理模块：CAN2 / 标准帧0x31 / DLC4 / 小端int16。
  * 只从CAN接收功率与缓冲，不向裁判模块发送查询或配置命令。
  * 启用功率限制时，无裁判反馈采用50W模型预算；比赛前改回1。 */
 #define ROBOT_POWER_CAN_BUS 2u
 #define ROBOT_POWER_CAN_ID 0x31u
-#define ROBOT_POWER_BYTE_ORDER POWER_ORDER_BIG_ENDIAN
+#define ROBOT_POWER_BYTE_ORDER POWER_ORDER_LITTLE_ENDIAN
 #define ROBOT_POWER_REQUIRE_REFEREE 0
 /* 四轮功率限制开关。 */
 #ifndef ROBOT_WHEEL_POWER_LIMIT_ENABLED
@@ -96,6 +101,11 @@ typedef struct {
     float min_deg, max_deg, boot_joint_deg, slew_deg_s;
     float position_kp, max_speed_deg_s;
 } JointConfig;
+typedef struct {
+    float position_kp, max_speed_deg_s;
+    PidConfig speed_pid;
+} YawTuning;
+extern volatile YawTuning g_yaw_tuning;
 extern const DjiConfig g_dji_config[DJI_COUNT];
 extern const DmConfig g_dm_config[DM_COUNT];
 extern const JointConfig g_joint_config[JOINT_COUNT];

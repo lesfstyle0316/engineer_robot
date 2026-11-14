@@ -6,14 +6,30 @@ static void advance(RobotCore *c, unsigned j, float input) {
     c->joint_target[j] = Control_Clamp(c->joint_target[j] + input * cfg->slew_deg_s * ROBOT_CONTROL_DT,
                                        cfg->min_deg, cfg->max_deg);
 }
-static float joint_speed_target(const RobotCore *c, unsigned j) {
-    const JointConfig *cfg = &g_joint_config[j];
+static float joint_speed_target(const RobotCore *c, unsigned j, const JointConfig *cfg) {
     float v = Control_Clamp((c->joint_target[j] - c->joint_measured[j]) * cfg->position_kp,
                             -cfg->max_speed_deg_s, cfg->max_speed_deg_s);
     if ((c->joint_measured[j] <= cfg->min_deg && v < 0) || (c->joint_measured[j] >= cfg->max_deg && v > 0))
         v = 0;
     return v;
 }
+static void apply_yaw_tuning(JointConfig *joint, PidConfig *pid) {
+    YawTuning tuning = g_yaw_tuning;
+    if (isfinite(tuning.position_kp) && tuning.position_kp >= 0.0f)
+        joint->position_kp = tuning.position_kp;
+    if (isfinite(tuning.max_speed_deg_s) && tuning.max_speed_deg_s >= 0.0f)
+        joint->max_speed_deg_s = fminf(tuning.max_speed_deg_s, joint->max_speed_deg_s);
+    if (isfinite(tuning.speed_pid.kp) && tuning.speed_pid.kp >= 0.0f)
+        pid->kp = tuning.speed_pid.kp;
+    if (isfinite(tuning.speed_pid.ki) && tuning.speed_pid.ki >= 0.0f)
+        pid->ki = tuning.speed_pid.ki;
+    if (isfinite(tuning.speed_pid.output_limit) && tuning.speed_pid.output_limit >= 0.0f)
+        pid->output_limit = fminf(tuning.speed_pid.output_limit, pid->output_limit);
+    if (isfinite(tuning.speed_pid.integral_limit) && tuning.speed_pid.integral_limit >= 0.0f)
+        pid->integral_limit = fminf(tuning.speed_pid.integral_limit, pid->output_limit);
+    pid->integral_limit = fminf(pid->integral_limit, pid->output_limit);
+}
+
 void Gimbal_Step(RobotCore *c, const RobotInput *in, uint32_t now) {
     const RcState *r = &in->rc;
     uint8_t mode = r->sw[ROBOT_RC_RIGHT_SWITCH];
@@ -24,7 +40,7 @@ void Gimbal_Step(RobotCore *c, const RobotInput *in, uint32_t now) {
             advance(c, JOINT_BIG_PITCH, vertical);
     } else if (mode == RC_DOWN) {
         advance(c, JOINT_SMALL_PITCH, vertical);
-        float close = horizontal * ROBOT_RC_GRIP_SIGN;
+        float close = ROBOT_GRIP_INSTALLED ? horizontal * ROBOT_RC_GRIP_SIGN : 0.0f;
         if (close < 0) {
             c->grip_hold = false;
             c->grip_contact_tracking = false;
@@ -49,15 +65,26 @@ void Gimbal_Step(RobotCore *c, const RobotInput *in, uint32_t now) {
     }
     for (unsigned j = 0; j < 3; j++) {
         unsigned i = DJI_YAW + j;
+        if (i == DJI_GRIP && !ROBOT_GRIP_INSTALLED) {
+            c->dji_command[i] = 0;
+            continue;
+        }
         const DjiConfig *cfg = &g_dji_config[i];
         if (j == JOINT_GRIP && c->grip_hold) {
             Pid_Reset(&c->speed_pid[i]);
             c->dji_command[i] =
                 (int16_t)(cfg->direction * Control_Clamp(ROBOT_GRIP_HOLD_CURRENT, 0, cfg->max_command));
         } else {
-            float rpm = joint_speed_target(c, j) * cfg->reduction / 6.0f;
+            JointConfig joint = g_joint_config[j];
+            PidConfig pid = cfg->speed_pid;
+            if (j == JOINT_YAW) {
+                apply_yaw_tuning(&joint, &pid);
+                c->speed_pid[i].integral = Control_Clamp(c->speed_pid[i].integral,
+                                                        -pid.integral_limit, pid.integral_limit);
+            }
+            float rpm = joint_speed_target(c, j, &joint) * cfg->reduction / 6.0f;
             float actual = in->dji[i].rpm * cfg->direction;
-            float u = Pid_Update(&c->speed_pid[i], &cfg->speed_pid, rpm - actual, ROBOT_CONTROL_DT);
+            float u = Pid_Update(&c->speed_pid[i], &pid, rpm - actual, ROBOT_CONTROL_DT);
             /* 软限位处清积分并阻止电流继续向外；无机械制动保证。 */
             if ((c->joint_measured[j] <= g_joint_config[j].min_deg && u < 0) ||
                 (c->joint_measured[j] >= g_joint_config[j].max_deg && u > 0)) {
