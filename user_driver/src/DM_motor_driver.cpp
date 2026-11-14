@@ -1,5 +1,6 @@
 // 达妙电机模板作者 Tessia，MIT 量程、使能和 CAN 设备接口按本工程适配。
 #include "DM_motor_driver.h"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 namespace {
@@ -49,7 +50,7 @@ bool DM_motor::motor_set_position(float pos, float vel) {
     if (!valid_ || cfg_.mode != DM_MODE_PV || !std::isfinite(pos) || !std::isfinite(vel) || std::fabs(pos) > cfg_.p_max || vel <= 0 ||
         vel > cfg_.velocity_limit_rad_s)
         return false;
-    Dm_PositionFrame(&can_tx.member, &cfg_, pos, vel);
+    Dm_PositionFrame(&can_tx.member, &cfg_, pos, vel, 0.0f);
     return true;
 }
 bool DM_motor::apply_frame(const MotorFrame &f, uint32_t now) {
@@ -65,10 +66,15 @@ bool DM_motor::apply_frame(const MotorFrame &f, uint32_t now) {
     }
     if (cfg_.mode == DM_MODE_PV)
         return motor_set_position(float_le(f.data), float_le(f.data + 4)) && can_send_msg(now);
-    /* 位置位域覆盖整个配置范围，其他位域必须与本机 MIT 保持参数一致。 */
+    /* 校验固定的速度和增益位域，以及允许的前馈力矩范围。 */
     MotorFrame hold;
-    Dm_PositionFrame(&hold, &cfg_, 0.0f, cfg_.velocity_limit_rad_s);
-    if (std::memcmp(f.data + 2, hold.data + 2, 6) != 0)
+    Dm_PositionFrame(&hold, &cfg_, 0.0f, cfg_.velocity_limit_rad_s, 0.0f);
+    if (std::memcmp(f.data + 2, hold.data + 2, 4) != 0 ||
+        (f.data[6] & 0xf0u) != (hold.data[6] & 0xf0u))
+        return false;
+    const unsigned torque = ((f.data[6] & 0x0fu) << 8) | f.data[7];
+    if (torque < float_to_uint(-cfg_.mit_ff_limit_nm, -cfg_.t_max, cfg_.t_max, 12) ||
+        torque > float_to_uint(cfg_.mit_ff_limit_nm, -cfg_.t_max, cfg_.t_max, 12))
         return false;
     can_tx.member = f;
     return can_send_msg(now);
@@ -113,7 +119,8 @@ bool Dm_ConfigIsValid(const DmConfig *c) {
     if (c->mode == DM_MODE_PV)
         return true;
     return c->mode == DM_MODE_MIT && c->mit_kp >= 500.0f / 4095.0f && c->mit_kp <= 500.0f &&
-           c->mit_kd >= 5.0f / 4095.0f && c->mit_kd <= 5.0f;
+           c->mit_kd >= 5.0f / 4095.0f && c->mit_kd <= 5.0f &&
+           c->mit_ff_limit_nm >= 0.0f && c->mit_ff_limit_nm <= c->t_max;
 }
 uint16_t Dm_CommandId(const DmConfig *c) {
     return c->motor_id + (c->mode == DM_MODE_PV ? 0x100u : 0u);
@@ -127,7 +134,8 @@ void Dm_SpecialFrame(MotorFrame *f, const DmConfig *c, bool enable) {
     f->data[7] = enable ? 0xfc : 0xfd;
 }
 
-void Dm_PositionFrame(MotorFrame *frame, const DmConfig *config, float p_des, float v_limit) {
+void Dm_PositionFrame(MotorFrame *frame, const DmConfig *config, float p_des, float v_limit,
+                      float torque_ff_nm) {
     *frame = {};
     frame->bus = 2;
     frame->id = Dm_CommandId(config);
@@ -143,7 +151,9 @@ void Dm_PositionFrame(MotorFrame *frame, const DmConfig *config, float p_des, fl
     const unsigned vel_tmp = float_to_uint(0.0f, -config->v_max, config->v_max, 12);
     const unsigned kp_tmp = float_to_uint(config->mit_kp, 0.0f, 500.0f, 12);
     const unsigned kd_tmp = float_to_uint(config->mit_kd, 0.0f, 5.0f, 12);
-    const unsigned tor_tmp = float_to_uint(0.0f, -config->t_max, config->t_max, 12);
+    const float ff_limit = config->mit_ff_limit_nm;
+    const float ff = std::isfinite(torque_ff_nm) ? std::clamp(torque_ff_nm, -ff_limit, ff_limit) : 0.0f;
+    const unsigned tor_tmp = float_to_uint(ff, -config->t_max, config->t_max, 12);
     data[0] = static_cast<uint8_t>(pos_tmp >> 8);
     data[1] = static_cast<uint8_t>(pos_tmp);
     data[2] = static_cast<uint8_t>(vel_tmp >> 4);

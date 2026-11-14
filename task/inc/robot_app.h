@@ -5,7 +5,7 @@ extern "C" {
 #endif
 #include "robot_core.h"
 #include "bsp_io.h"
-/* 可在调试器中实时更改模式；变化会停机并要求回中500ms。 */
+/* 非零时急停，恢复为 0 后满足反馈和回中条件方可解锁。 */
 extern volatile uint32_t g_robot_emergency_stop;
 typedef struct {
     uint32_t heartbeat_ms, iterations, can_send_failures, max_cycle_us;

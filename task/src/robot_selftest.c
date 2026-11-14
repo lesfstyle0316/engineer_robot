@@ -80,13 +80,13 @@ static void test_protocols(void) {
           f.data[3] == 255);
     DmConfig pv_config = g_dm_config[DM_BIG_PITCH];
     pv_config.mode = DM_MODE_PV;
-    Dm_PositionFrame(&f, &pv_config, 1.0f, 0.2f);
+    Dm_PositionFrame(&f, &pv_config, 1.0f, 0.2f, 0.0f);
     const uint8_t pv[8] = {0, 0, 0x80, 0x3f, 0xcd, 0xcc, 0x4c, 0x3e};
     CHECK(!memcmp(f.data, pv, 8) && f.id == 0x100u + pv_config.motor_id);
     DmConfig lift = g_dm_config[DM_LIFT_L];
     lift.mit_kp = 6.0f;
     lift.mit_kd = 0.4f;
-    Dm_PositionFrame(&f, &lift, 0.0f, 0.0f);
+    Dm_PositionFrame(&f, &lift, 0.0f, 0.0f, 0.0f);
     const uint8_t mit[8] = {0x80, 0, 0x80, 0, 0x31, 0x14, 0x88, 0};
     CHECK(f.bus == 2 && f.dlc == 8 && f.id == 0x02 && !memcmp(f.data, mit, 8));
     Dm_SpecialFrame(&f, &g_dm_config[DM_LIFT_L], true);
@@ -202,9 +202,10 @@ static void test_startup_and_rates(void) {
             const MotorFrame *f = &out.frames[i];
             if (f->bus == 1)
                 n[0]++;
-            else if (f->id == 0x200)
+            else if (f->id == 0x200) {
+                CHECK(t % 5u == 0u);
                 n[1]++;
-            else if (f->id == 0x1ff)
+            } else if (f->id == 0x1ff)
                 n[2]++;
             else {
                 unsigned dm = 0;
@@ -216,25 +217,33 @@ static void test_startup_and_rates(void) {
         }
     }
     safe_frames();
-    CHECK(n[0] == 500 && n[1] == 500 && n[2] == 500 && n[3] == 200 && n[4] == 200 && n[5] == 200);
+    CHECK(n[0] == 500 && n[1] == 200 && n[2] == 500 && n[3] == 200 && n[4] == 200 && n[5] == 200);
     fixture();
     in.dji[DJI_RR].zero_ready = false;
     run(600);
     CHECK(!c.armed && (c.stop_reason & ROBOT_STOP_FEEDBACK));
+    CHECK(c.dji_feedback_status[DJI_RR] == MOTOR_FEEDBACK_WAIT_ZERO);
     fixture();
     in.dji[DJI_YAW].seen = false;
     run(600);
     CHECK(!c.armed && (c.stop_reason & ROBOT_STOP_FEEDBACK));
-    puts("PASS whole-robot startup checks, 500Hz DJI / 200Hz per DM");
+    CHECK(c.dji_feedback_status[DJI_YAW] == MOTOR_FEEDBACK_NOT_SEEN);
+    puts("PASS whole-robot startup checks, 500Hz chassis/yaw, 200Hz arm current group and per DM");
 }
 static void test_motion(void) {
     arm();
     in.rc.sw[1] = RC_UP;
     in.rc.channel[0] = 660;
     in.rc.channel[1] = 660;
+    /* Use fixed gains so user tuning cannot mask speed clamping with output saturation. */
+    const YawTuning yaw_tuning = g_yaw_tuning;
+    g_yaw_tuning = (YawTuning){4.0f, {60.0f, 0.0f, 0.0f, 4000.0f}};
     run(1000);
-    NEAR(c.joint_target[JOINT_YAW], 30, 0.05f);
-    NEAR(c.joint_target[JOINT_BIG_PITCH], 12, 0.05f);
+    NEAR(c.joint_target[JOINT_YAW], -30, 0.05f);
+    /* At -30 deg error, yaw requests -120 deg/s, beyond the former 40 deg/s cap. */
+    NEAR((float)c.dji_command[DJI_YAW], -1200.0f, 2.0f);
+    g_yaw_tuning = yaw_tuning;
+    NEAR(c.joint_target[JOINT_BIG_PITCH], g_joint_config[JOINT_BIG_PITCH].slew_deg_s, 0.05f);
     CHECK(c.joint_target[JOINT_SMALL_PITCH] == 0 && c.joint_target[JOINT_GRIP] == 0);
     float yaw = c.joint_target[0], pitch = c.joint_target[5];
     in.rc.sw[1] = RC_MID;
@@ -242,6 +251,7 @@ static void test_motion(void) {
     NEAR(c.joint_target[0], yaw, 0.001f);
     NEAR(c.joint_target[5], pitch, 0.001f);
     in.rc.sw[1] = RC_DOWN;
+    in.rc.channel[0] = 660;
     run(500);
     CHECK(c.joint_target[JOINT_SMALL_PITCH] > 0);
     CHECK((c.joint_target[JOINT_GRIP] > 0) == (ROBOT_GRIP_INSTALLED != 0));
@@ -266,12 +276,61 @@ static void test_motion(void) {
     NEAR(c.joint_target[JOINT_LIFT_R], 0.0f, 0.001f);
     in.rc.sw[ROBOT_RC_LEFT_SWITCH] = RC_MID;
     in.rc.sw[1] = RC_UP;
-    in.rc.channel[0] = 660;
-    run(7000);
-    NEAR(c.joint_target[0], 83, 0.001f);
     in.rc.channel[0] = -660;
-    run(13000);
-    NEAR(c.joint_target[0], -21, 0.001f);
+    run(7000);
+    NEAR(c.joint_target[JOINT_YAW], 25.0f, 0.001f);
+    CHECK(c.dji_command[DJI_YAW] > 4000);
+    in.dji[DJI_YAW].total_counts = (int64_t)ceilf(25.0f * 8192.0f / 360.0f);
+    in.dji[DJI_YAW].rpm = -10;
+    step();
+    CHECK(c.dji_command[DJI_YAW] == 0);
+
+    in.dji[DJI_YAW].total_counts = 0;
+    in.dji[DJI_YAW].rpm = 0;
+    in.rc.channel[0] = 660;
+    run(6000);
+    NEAR(c.joint_target[JOINT_YAW], -120.0f, 0.001f);
+    CHECK(c.dji_command[DJI_YAW] == -20000);
+    in.dji[DJI_YAW].total_counts = (int64_t)floorf(-120.0f * 8192.0f / 360.0f);
+    in.dji[DJI_YAW].rpm = 10;
+    step();
+    CHECK(c.dji_command[DJI_YAW] == 0);
+    arm();
+    const JointConfig *small_pitch = &g_joint_config[JOINT_SMALL_PITCH];
+    const DjiConfig *small_pitch_motor = &g_dji_config[DJI_SMALL_PITCH];
+    const float reduction = small_pitch_motor->reduction;
+    const float kp = small_pitch_motor->speed_pid.kp;
+    const float output_limit = fminf(small_pitch_motor->speed_pid.output_limit, small_pitch_motor->max_command);
+    /* Return toward the held zero target from 5 degrees above it at rest. */
+    in.dji[DJI_SMALL_PITCH].total_counts =
+        (int64_t)(5.0f * reduction * small_pitch_motor->direction * 8192.0f / 360.0f);
+    step();
+    NEAR(c.joint_measured[JOINT_SMALL_PITCH], 5.0f, 0.001f);
+    const float rest_speed = 5.0f * small_pitch->position_kp;
+    const float rest_output = fminf(kp * rest_speed * reduction / 6.0f, output_limit);
+    NEAR((float)c.dji_command[DJI_SMALL_PITCH], -small_pitch_motor->direction * rest_output, 2.0f);
+    const int16_t first_command = c.dji_command[DJI_SMALL_PITCH];
+    run(500);
+    CHECK(c.dji_command[DJI_SMALL_PITCH] == first_command); /* No integral buildup. */
+
+    in.dji[DJI_SMALL_PITCH].total_counts =
+        (int64_t)(2.0f * reduction * small_pitch_motor->direction * 8192.0f / 360.0f);
+    in.dji[DJI_SMALL_PITCH].rpm = (int16_t)(-60.0f * small_pitch_motor->direction);
+    const float speed = -2.0f * small_pitch->position_kp +
+                        ROBOT_ARM_M2006_POSITION_KD * (60.0f * 6.0f / reduction);
+    const float proportional = kp * (speed * reduction / 6.0f + 60.0f);
+    const float derivative = ROBOT_ARM_M2006_SPEED_KD * 60.0f /
+                             (ROBOT_ARM_M2006_SPEED_D_FILTER_S + ROBOT_CONTROL_DT);
+    step();
+    NEAR((float)c.dji_command[DJI_SMALL_PITCH],
+         small_pitch_motor->direction * Control_Clamp(proportional + derivative, -output_limit, output_limit),
+         2.0f);
+    run(500);
+    NEAR((float)c.dji_command[DJI_SMALL_PITCH],
+         small_pitch_motor->direction * Control_Clamp(proportional, -output_limit, output_limit), 2.0f);
+    in.rc.valid = false;
+    step();
+    CHECK(!c.arm_m2006_speed_pd[0].sampled && c.arm_m2006_speed_pd[0].acceleration == 0.0f);
     arm();
     in.rc.channel[2] = 660;
     run(100);
@@ -458,6 +517,7 @@ static void test_safety(void) {
     in.dji[4].position_lost = true;
     step();
     CHECK(!c.armed && (c.stop_reason & ROBOT_STOP_POSITION_LOST));
+    CHECK(c.dji_feedback_status[DJI_YAW] == MOTOR_FEEDBACK_POSITION_LOST);
     arm();
     in.hardware_limit_mask = 1;
     step();
@@ -488,6 +548,24 @@ static void test_safety(void) {
     in.dm[DM_BIG_PITCH].position = NAN;
     step();
     CHECK(!c.armed && (c.stop_reason & ROBOT_STOP_FEEDBACK));
+    CHECK(c.dm_feedback_status[DM_BIG_PITCH] == MOTOR_FEEDBACK_INVALID_POSITION);
+
+    arm();
+    fresh();
+    in.dji[DJI_LF].stamp_ms = now - ROBOT_MOTOR_TIMEOUT_MS + 1u;
+    in.dm[DM_LIFT_R].stamp_ms = now - ROBOT_MOTOR_TIMEOUT_MS;
+    RobotCore_Step(&c, &in, now, &out);
+    CHECK(!c.armed && c.stop_reason == ROBOT_STOP_FEEDBACK);
+    CHECK(c.dji_feedback_status[DJI_LF] == MOTOR_FEEDBACK_OK);
+    CHECK(c.dm_feedback_status[DM_LIFT_R] == MOTOR_FEEDBACK_TIMEOUT);
+
+    in.rc.valid = false;
+    RobotCore_Step(&c, &in, ++now, &out);
+    CHECK(c.stop_reason == ROBOT_STOP_RC);
+    CHECK(c.dji_feedback_status[DJI_LF] == MOTOR_FEEDBACK_TIMEOUT);
+    CHECK(c.dm_feedback_status[DM_LIFT_R] == MOTOR_FEEDBACK_TIMEOUT);
+    CHECK(c.dji_feedback_status[DJI_GRIP] ==
+          (ROBOT_GRIP_INSTALLED ? MOTOR_FEEDBACK_OK : MOTOR_FEEDBACK_NOT_INSTALLED));
     /* Unsigned timeout arithmetic works across the 32-bit ms rollover. */
     fixture();
     now = UINT32_MAX - 250u;
@@ -500,6 +578,15 @@ static void test_grip_and_dm_enable(void) {
     in.rc.sw[1] = RC_DOWN;
     in.rc.channel[0] = 660;
     in.dji[DJI_GRIP].seen = ROBOT_GRIP_INSTALLED != 0;
+    if (ROBOT_GRIP_INSTALLED) {
+        run(200);
+        CHECK(c.dji_command[DJI_GRIP] > 1800 && !c.grip_hold);
+        in.dji[DJI_GRIP].rpm = 60;
+        step();
+        CHECK(c.arm_m2006_speed_pd[JOINT_GRIP - JOINT_SMALL_PITCH].acceleration > 0.0f);
+        CHECK(c.arm_m2006_speed_pd[0].acceleration == 0.0f);
+        in.dji[DJI_GRIP].rpm = 0;
+    }
     in.dji[DJI_GRIP].current = 1500;
     run(200);
     CHECK(c.grip_hold == (ROBOT_GRIP_INSTALLED != 0));
@@ -531,6 +618,78 @@ static void test_grip_and_dm_enable(void) {
     }
     CHECK(enabled);
     puts("PASS gripper contact / hold / release, DM enable handshake");
+}
+
+static void test_big_pitch_gravity(void) {
+    fixture();
+    in.dm[DM_BIG_PITCH].state = 0;
+    run(501);
+    CHECK(c.armed && c.big_pitch_gravity_ff_nm == 0.0f);
+
+    in.dm[DM_BIG_PITCH].state = 1;
+    step();
+    CHECK(c.big_pitch_gravity_ff_nm == 0.0f);
+    step();
+    NEAR(c.big_pitch_gravity_ff_nm, 0.003f, 0.000001f);
+    run(350);
+    NEAR(c.big_pitch_gravity_ff_nm, 0.906115f, 0.0001f);
+    in.dm[DM_BIG_PITCH].position = 43.0f * ROBOT_DEG2RAD;
+    run(350);
+    NEAR(c.big_pitch_gravity_ff_nm, 0.4793f, 0.0002f);
+    in.dm[DM_BIG_PITCH].position = 48.5f * ROBOT_DEG2RAD;
+    run(350);
+    CHECK(c.big_pitch_gravity_ff_nm == 0.0f);
+
+    in.dm[DM_BIG_PITCH].position = 0.0f;
+    run(350);
+    CHECK(c.big_pitch_gravity_ff_nm > 0.90f);
+    in.rc.valid = false;
+    step();
+    CHECK(!c.armed && c.big_pitch_gravity_ff_nm == 0.0f);
+}
+
+static void test_small_pitch_gravity(void) {
+    static const float samples[][3] = {
+        {11.0f, 25.0f, 0.0f},
+        {17.0f, 25.0f, -700.0f},
+        {22.0f, 25.0f, -1400.0f},
+        {22.0f, 32.0f, -1200.0f},
+        {22.0f, 64.0f, -1143.0f},
+        {31.5f, 46.0f, -2427.0f},
+        {35.0f, 71.0f, -1812.0f},
+        {36.0f, 80.0f, -1812.0f},
+    };
+
+    arm();
+    const DjiConfig *small = &g_dji_config[DJI_SMALL_PITCH];
+    const DmConfig *big = &g_dm_config[DM_BIG_PITCH];
+    for (unsigned i = 0; i < sizeof(samples) / sizeof(samples[0]); ++i) {
+        const float small_deg = samples[i][0];
+        in.dji[DJI_SMALL_PITCH].total_counts =
+            (int64_t)lroundf(small_deg * small->direction * small->reduction * 8192.0f / 360.0f);
+        in.dm[DM_BIG_PITCH].position = samples[i][1] * ROBOT_DEG2RAD * big->direction * big->external_reduction;
+        step();
+        c.joint_target[JOINT_SMALL_PITCH] = c.joint_measured[JOINT_SMALL_PITCH];
+        run(700);
+        NEAR(c.small_pitch_gravity_ff_command, samples[i][2], 1.0f);
+        NEAR((float)c.dji_command[DJI_SMALL_PITCH], samples[i][2], 1.1f);
+    }
+
+    c.joint_target[JOINT_SMALL_PITCH] = 0.0f;
+    step();
+    CHECK(c.dji_command[DJI_SMALL_PITCH] == (int16_t)small->max_command);
+    /* A positive-joint feedforward must be blocked at the upper soft limit. */
+    in.dji[DJI_SMALL_PITCH].total_counts =
+        (int64_t)lroundf(38.0f * small->direction * small->reduction * 8192.0f / 360.0f);
+    step();
+    c.joint_target[JOINT_SMALL_PITCH] = c.joint_measured[JOINT_SMALL_PITCH];
+    step();
+    CHECK(c.small_pitch_gravity_ff_command < 0.0f && c.dji_command[DJI_SMALL_PITCH] == 0);
+
+    in.rc.valid = false;
+    step();
+    CHECK(!c.armed && c.small_pitch_gravity_ff_command == 0.0f && c.dji_command[DJI_SMALL_PITCH] == 0);
+    puts("PASS small pitch gravity interpolation, output direction, saturation, soft limit and radio stop");
 }
 
 static PowerConfig power_cfg(void) {
@@ -940,6 +1099,8 @@ int main(void) {
     test_paired_lift_catch_up();
     test_safety();
     test_grip_and_dm_enable();
+    test_big_pitch_gravity();
+    test_small_pitch_gravity();
     test_power_protocol_and_math();
     test_power_limiter();
     test_power_bench_after_referee_timeout();

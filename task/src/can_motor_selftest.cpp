@@ -191,6 +191,8 @@ static void test_dji_objects() {
     DJI_motor yaw(net, yaw_group, g_dji_config[DJI_YAW], ROBOT_YAW_MOTOR_ID, DJI_GM6020);
     CHECK(yaw.valid() && !yaw.motor_set_current(0.1f));
     CHECK(yaw.motor_set_voltage(0.1f) && yaw.command() == 3000);
+    CHECK(yaw.accepts_raw(20000) && yaw.accepts_raw(-20000));
+    CHECK(!yaw.accepts_raw(20001) && !yaw.accepts_raw(-20001));
     DjiConfig cfg = g_dji_config[DJI_YAW];
     cfg.feedback_id = 0x20b;
     DJI_motor_group last_group(net, 2, 0x2ff);
@@ -223,14 +225,14 @@ static void test_dm_objects() {
     can_device_transmit_member msg{};
     CHECK(net.pop(2, 1, msg));
     CHECK(msg.frame.id == 0x02 && msg.frame.data[7] == 0xfc);
-    Dm_PositionFrame(&command, &lift_cfg, 1.0f, 0.2f);
+    Dm_PositionFrame(&command, &lift_cfg, 1.0f, 0.2f, 0.0f);
     CHECK(motor.apply_frame(command, 2));
     CHECK(net.pop(2, 2, msg));
     CHECK(!std::memcmp(command.data, msg.frame.data, 8));
     CHECK(!pitch.apply_frame(command, 2));
     command.data[4] ^= 1u;
     CHECK(!motor.apply_frame(command, 2));
-    Dm_PositionFrame(&command, &pitch_cfg, 1.0f, 0.2f);
+    Dm_PositionFrame(&command, &pitch_cfg, 1.0f, 0.2f, 0.0f);
     CHECK(!motor.apply_frame(command, 2) && pitch.apply_frame(command, 2));
     CHECK(net.pop(2, 2, msg) && msg.frame.id == 0x100u + pitch_cfg.motor_id);
     CHECK(!std::memcmp(command.data, msg.frame.data, 8));
@@ -372,13 +374,21 @@ static void test_system_replay() {
                     while (dm < DM_COUNT && msg.frame.id != Dm_CommandId(&g_dm_config[dm]))
                         ++dm;
                     CHECK(dm < DM_COUNT);
+                    if (core.armed) {
+                        const auto raw_torque = ((msg.frame.data[6] & 0x0fu) << 8) | msg.frame.data[7];
+                        const float expected = dm == DM_BIG_PITCH ? core.big_pitch_gravity_ff_nm : 0.0f;
+                        const float range = g_dm_config[dm].t_max;
+                        NEAR(Dm_Unpack(raw_torque, range, 12), expected, range / 4095.0f + 0.00001f);
+                        if (dm == DM_BIG_PITCH && now > 650)
+                            CHECK(raw_torque > 2048u);
+                    }
                     ++frames[3 + dm];
                 }
             }
         }
         CHECK(sent == out.count);
     }
-    CHECK(!core.armed && frames[0] == 500 && frames[1] == 500 && frames[2] == 500 && frames[3] == 200 &&
+    CHECK(!core.armed && frames[0] == 500 && frames[1] == 200 && frames[2] == 500 && frames[3] == 200 &&
           frames[4] == 200 && frames[5] == 200);
     /* Wrong-length power messages must reach its reject handler, not refresh stale data. */
     auto bad = frame(2, 0x31, 8);
@@ -398,7 +408,7 @@ static void test_system_replay() {
     CHECK(!std::memcmp(p.raw, negative_buffer.data, sizeof(p.raw)));
     CHECK(!MotorSystem_SendFrame(&bad, 1000));
     std::puts("PASS 1000-cycle real controller -> motor objects -> CAN queues replay: every payload "
-              "preserved, 500/200Hz scheduling and radio stop");
+              "preserved, 500Hz chassis/yaw, 200Hz arm current group and per DM, and radio stop");
 }
 int main() {
     test_registry();

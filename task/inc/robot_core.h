@@ -16,6 +16,15 @@ enum {
     ROBOT_STOP_LIMIT = 256u,
     ROBOT_STOP_NEUTRAL_REQUIRED = 1024u,
 };
+enum {
+    MOTOR_FEEDBACK_NOT_SEEN = 0u,
+    MOTOR_FEEDBACK_OK = 1u,
+    MOTOR_FEEDBACK_TIMEOUT = 2u,
+    MOTOR_FEEDBACK_WAIT_ZERO = 3u,
+    MOTOR_FEEDBACK_INVALID_POSITION = 4u,
+    MOTOR_FEEDBACK_POSITION_LOST = 5u,
+    MOTOR_FEEDBACK_NOT_INSTALLED = 6u,
+};
 typedef struct {
     RcState rc;
     DjiFeedback dji[DJI_COUNT];
@@ -25,6 +34,10 @@ typedef struct {
     uint32_t hardware_limit_mask; /* 任一非0位触发全局停机，不自动回零 */
     bool emergency_stop;
 } RobotInput;
+typedef struct {
+    float previous_rpm, acceleration;
+    bool sampled;
+} JointSpeedPd;
 typedef struct {
     bool armed, neutral_tracking, grip_hold;
     bool dm_origin_valid[DM_COUNT];
@@ -41,6 +54,11 @@ typedef struct {
     float dm_target[DM_COUNT];
     bool dm_active_seen[DM_COUNT];
     MotorOutput motor_output;
+    uint8_t dji_feedback_status[DJI_COUNT];
+    uint8_t dm_feedback_status[DM_COUNT];
+    float big_pitch_gravity_ff_nm;
+    JointSpeedPd arm_m2006_speed_pd[JOINT_GRIP - JOINT_SMALL_PITCH + 1];
+    float small_pitch_gravity_ff_command; /* C610 原生方向，电流指令原始单位 */
 } RobotCore;
 typedef struct {
     bool abort_pending, abort_wheel_pending, armed;

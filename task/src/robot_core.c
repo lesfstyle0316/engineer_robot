@@ -27,6 +27,36 @@ static void measurements(RobotCore *c, const RobotInput *in) {
     c->lift_skew_deg = c->joint_measured[JOINT_LIFT_L] - c->joint_measured[JOINT_LIFT_R];
 }
 
+static void update_motor_feedback_status(RobotCore *c, const RobotInput *in, uint32_t now) {
+    for (unsigned i = 0; i < DJI_COUNT; i++) {
+        const DjiFeedback *d = &in->dji[i];
+        uint8_t status = MOTOR_FEEDBACK_OK;
+        if (i == DJI_GRIP && !ROBOT_GRIP_INSTALLED)
+            status = MOTOR_FEEDBACK_NOT_INSTALLED;
+        else if (!d->seen)
+            status = MOTOR_FEEDBACK_NOT_SEEN;
+        else if ((uint32_t)(now - d->stamp_ms) >= ROBOT_MOTOR_TIMEOUT_MS)
+            status = MOTOR_FEEDBACK_TIMEOUT;
+        else if (!d->zero_ready)
+            status = MOTOR_FEEDBACK_WAIT_ZERO;
+        else if (i >= DJI_YAW && d->position_lost)
+            status = MOTOR_FEEDBACK_POSITION_LOST;
+        c->dji_feedback_status[i] = status;
+    }
+
+    for (unsigned i = 0; i < DM_COUNT; i++) {
+        const DmFeedback *d = &in->dm[i];
+        uint8_t status = MOTOR_FEEDBACK_OK;
+        if (!d->seen)
+            status = MOTOR_FEEDBACK_NOT_SEEN;
+        else if ((uint32_t)(now - d->stamp_ms) >= ROBOT_MOTOR_TIMEOUT_MS)
+            status = MOTOR_FEEDBACK_TIMEOUT;
+        else if (!isfinite(d->position))
+            status = MOTOR_FEEDBACK_INVALID_POSITION;
+        c->dm_feedback_status[i] = status;
+    }
+}
+
 static uint32_t stop_reason(const RobotCore *c, const RobotInput *in, uint32_t now) {
     if (!in->rc.valid || (uint32_t)(now - in->rc.stamp_ms) >= ROBOT_RC_TIMEOUT_MS ||
         in->rc.bad_frames != c->last_bad_frames)
@@ -38,19 +68,17 @@ static uint32_t stop_reason(const RobotCore *c, const RobotInput *in, uint32_t n
     if (in->bus_fault_mask)
         return ROBOT_STOP_BUS;
     for (unsigned i = 0; i < DJI_COUNT; i++) {
-        if (i == DJI_GRIP && !ROBOT_GRIP_INSTALLED)
-            continue;
-        const DjiFeedback *d = &in->dji[i];
-        if (!d->seen || !d->zero_ready || (uint32_t)(now - d->stamp_ms) >= ROBOT_MOTOR_TIMEOUT_MS)
-            return ROBOT_STOP_FEEDBACK;
-        if (i >= DJI_YAW && d->position_lost)
+        uint8_t status = c->dji_feedback_status[i];
+        if (status == MOTOR_FEEDBACK_POSITION_LOST)
             return ROBOT_STOP_POSITION_LOST;
+        if (status != MOTOR_FEEDBACK_OK && status != MOTOR_FEEDBACK_NOT_INSTALLED)
+            return ROBOT_STOP_FEEDBACK;
     }
     for (unsigned i = 0; i < DM_COUNT; i++) {
-        const DmFeedback *d = &in->dm[i];
-        if (!d->seen || (uint32_t)(now - d->stamp_ms) >= ROBOT_MOTOR_TIMEOUT_MS || !isfinite(d->position))
+        if (c->dm_feedback_status[i] != MOTOR_FEEDBACK_OK)
             return ROBOT_STOP_FEEDBACK;
-        if (d->state > 1u || (d->state == 0u && c->dm_active_seen[i]))
+        uint8_t state = in->dm[i].state;
+        if (state > 1u || (state == 0u && c->dm_active_seen[i]))
             return ROBOT_STOP_DM_ERROR;
     }
     return 0u;
@@ -58,10 +86,13 @@ static uint32_t stop_reason(const RobotCore *c, const RobotInput *in, uint32_t n
 
 static void reset_control(RobotCore *c) {
     memset(c->speed_pid, 0, sizeof(c->speed_pid));
+    memset(c->arm_m2006_speed_pd, 0, sizeof(c->arm_m2006_speed_pd));
+    c->small_pitch_gravity_ff_command = 0.0f;
     memset(c->dji_command, 0, sizeof(c->dji_command));
     memset(c->dm_active_seen, 0, sizeof(c->dm_active_seen));
     memset(&c->motor_output, 0, sizeof(c->motor_output));
     PowerLimiter_ResetOutput(&c->power);
+    c->big_pitch_gravity_ff_nm = 0.0f;
     c->grip_hold = false;
     c->grip_contact_tracking = false;
     c->lift_wait_mask = 0u;
@@ -114,6 +145,7 @@ void RobotCore_Step(RobotCore *c, const RobotInput *in, uint32_t now, RobotOutpu
     bool was_armed = c->armed;
     float previous_power = c->power.k_applied;
     measurements(c, in);
+    update_motor_feedback_status(c, in, now);
 
     uint32_t reason = stop_reason(c, in, now);
     c->last_bad_frames = in->rc.bad_frames;
@@ -147,5 +179,5 @@ void RobotCore_Step(RobotCore *c, const RobotInput *in, uint32_t now, RobotOutpu
     out->armed = c->armed;
     out->reason = c->stop_reason;
     out->count = MotorOutput_BuildFrames(&c->motor_output, in->dm, c->dji_command, c->dm_target,
-                                         c->armed, c->step_count++, out->frames);
+                                         c->big_pitch_gravity_ff_nm, c->armed, c->step_count++, out->frames);
 }

@@ -8,7 +8,7 @@ extern "C" {
 /* 唯一的集中配置入口。先看 README.md。单位写在字段名或注释中。 */
 /* 夹爪拆下调试时为 0，装回后设为 1。 */
 #ifndef ROBOT_GRIP_INSTALLED
-#define ROBOT_GRIP_INSTALLED 0
+#define ROBOT_GRIP_INSTALLED 1
 #endif
 /* CAN对象层容量与最长待发/邮箱驻留时间；两路分别分配固定存储。 */
 #define ROBOT_CAN_MAX_RX_PER_BUS 16u
@@ -18,7 +18,8 @@ extern "C" {
 #define ROBOT_MOTOR_TIMEOUT_MS 200u
 #define ROBOT_NEUTRAL_DWELL_MS 500u
 #define ROBOT_DJI_ZERO_FRAMES 51u /* 第 51 帧有效反馈建立零点 */
-#define ROBOT_DJI_PERIOD_MS 2u /* 500Hz 控制，反馈 1000Hz */
+#define ROBOT_DJI_PERIOD_MS 2u /* 底盘和大 yaw 控制 500 Hz */
+#define ROBOT_ARM_CURRENT_PERIOD_MS 5u /* CAN2 0x200，小 pitch 和夹爪控制 200 Hz */
 #define ROBOT_DM_PERIOD_MS 5u  /* 200Hz 控制 + 200Hz 回复 */
 #define ROBOT_CONTROL_DT 0.001f
 #define ROBOT_RC_DEADBAND 20
@@ -26,7 +27,7 @@ extern "C" {
 #define ROBOT_RC_RIGHT_SWITCH 1u /* 协议 S2 */
 #define ROBOT_RC_FORWARD_SIGN 1.0f
 #define ROBOT_RC_TURN_SIGN 1.0f
-#define ROBOT_RC_YAW_SIGN 1.0f /* 推右 = 正关节方向，可在此取反 */
+#define ROBOT_RC_YAW_SIGN (-1.0f) /* 推右减小 yaw 目标角，推左增大 */
 #define ROBOT_RC_PITCH_SIGN 1.0f
 #define ROBOT_RC_GRIP_SIGN 1.0f     /* 推右 = 夹紧 */
 #define ROBOT_M3508_P19_REDUCTION (3591.0f / 187.0f)
@@ -34,6 +35,10 @@ extern "C" {
 #define ROBOT_C620_MAX_COMMAND 16384.0f
 #define ROBOT_YAW_MOTOR_ID 2u
 #define ROBOT_SMALL_PITCH_MOTOR_ID 3u
+/* 小 pitch 与夹爪的 M2006 双环 PD 微分参数。 */
+#define ROBOT_ARM_M2006_POSITION_KD 0.20f
+#define ROBOT_ARM_M2006_SPEED_KD 0.020f
+#define ROBOT_ARM_M2006_SPEED_D_FILTER_S 0.020f
 #define ROBOT_GRIP_MOTOR_ID 1u
 /* 前轮电流直控，后轮仅在满足缓冲助力条件时输出。关闭后恢复四轮速度环。 */
 #ifndef ROBOT_FRONT_WHEEL_CURRENT_TEST
@@ -71,6 +76,13 @@ extern "C" {
 #define ROBOT_GRIP_HOLD_CURRENT 700.0f
 #define ROBOT_GRIP_STALL_SPEED_DEG_S 3.0f
 #define ROBOT_GRIP_CONTACT_MS 150u
+/* 大 pitch 重力拟合系数按达妙反馈的原生力矩方向标定。 */
+#define ROBOT_BIG_PITCH_GRAVITY_COS_NM 0.906115f
+#define ROBOT_BIG_PITCH_GRAVITY_SIN_NM 0.397225f
+#define ROBOT_BIG_PITCH_GRAVITY_MIN_DEG (-5.4f)
+#define ROBOT_BIG_PITCH_GRAVITY_MAX_DEG 38.0f
+#define ROBOT_BIG_PITCH_GRAVITY_FADE_DEG 10.0f
+#define ROBOT_BIG_PITCH_GRAVITY_SLEW_NM_S 3.0f
 #define ROBOT_PI 3.14159265358979323846f
 #define ROBOT_DEG2RAD (ROBOT_PI / 180.0f)
 #define ROBOT_RAD2DEG (180.0f / ROBOT_PI)
@@ -95,14 +107,15 @@ typedef struct {
     float external_reduction; /* 达妙协议角度增量 / 机构角度增量的绝对值 */
     float velocity_limit_rad_s; /* 输出轴，PV 命令限速或 MIT 目标速度上限 */
     DmMode mode;
-    float mit_kp, mit_kd;
+    float mit_kp, mit_kd, mit_ff_limit_nm;
 } DmConfig;
 typedef struct {
     float min_deg, max_deg, boot_joint_deg, slew_deg_s;
-    float position_kp, max_speed_deg_s;
+    float position_kp;
+    float max_speed_deg_s; /* 大疆关节的位置环目标速度上限，0 为不限幅 */
 } JointConfig;
 typedef struct {
-    float position_kp, max_speed_deg_s;
+    float position_kp;
     PidConfig speed_pid;
 } YawTuning;
 extern volatile YawTuning g_yaw_tuning;

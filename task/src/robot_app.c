@@ -22,12 +22,14 @@ static void ControlTask(void *arg) {
     s_running = true;
     uint8_t tx_fault_mask = 0;
     for (;;) {
-        uint32_t cycles = DWT->CYCCNT, now = HAL_GetTick();
+        uint32_t cycles = DWT->CYCCNT;
         BspSnapshot snapshot;
         RobotInput in = {0};
         RobotOutput out;
         BSP_Dbus_Service();
         BSP_IO_Snapshot(&snapshot);
+        /* 先取快照，再取时间，避免中断更新的反馈时间戳晚于 now。 */
+        uint32_t now = HAL_GetTick();
         in.rc = snapshot.rc;
         in.power = snapshot.power;
         memcpy(in.dji, snapshot.dji, sizeof(in.dji));
